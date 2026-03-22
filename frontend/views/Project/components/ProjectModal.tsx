@@ -1,0 +1,261 @@
+import React, { useState, useEffect } from 'react';
+import { X, Loader2 } from 'lucide-react';
+import { ProjectFormData, User, Device, Region, Branch } from '../types';
+import { getApiUrl } from '@/src/api/config';
+
+interface ProjectModalProps {
+  isEdit?: boolean;
+  initialData?: ProjectFormData;
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+export function ProjectModal({ isEdit = false, initialData, onClose, onSuccess }: ProjectModalProps) {
+  const [formData, setFormData] = useState<ProjectFormData>(
+    initialData || {
+      name: '',
+      description: '',
+      manager: '',
+      status: 'active',
+      remark: '',
+      user_ids: [],
+      device_ids: [],
+      region_ids: [],
+    }
+  );
+
+  const [availableUsers, setAvailableUsers] = useState<User[]>([]);
+  const [availableDevices, setAvailableDevices] = useState<Device[]>([]);
+  const [availableRegions, setAvailableRegions] = useState<Region[]>([]);
+  const [availableBranches, setAvailableBranches] = useState<Branch[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    // 加载可选的用户、设备、区域、分公司
+    Promise.all([
+      fetch(getApiUrl('/admin/users')).then((r) => r.json()).catch(() => []),
+      fetch(getApiUrl('/devices/')).then((r) => r.json()).catch(() => []),
+      fetch(getApiUrl('/fence/regions')).then((r) => r.json()).catch(() => []),
+      // fix: dashboard controller uses /api/dashboard prefix
+      fetch(getApiUrl('/api/dashboard/branches')).then((r) => r.json()).catch(() => []),
+    ]).then(([users, devices, regions, branches]) => {
+      setAvailableUsers(users || []);
+      setAvailableDevices(devices || []);
+      setAvailableRegions(regions || []);
+      // fix: ensure branches is an array to avoid map error
+      setAvailableBranches(Array.isArray(branches) ? branches : []);
+    });
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+
+    try {
+      const url = isEdit ? getApiUrl(`/projects/${(initialData as any).id}`) : getApiUrl('/projects/');
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
+      });
+
+      if (!res.ok) throw new Error('Failed to save project');
+      onSuccess();
+    } catch (error) {
+      console.error('Error saving project:', error);
+      alert(isEdit ? '更新失败' : '创建失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-800 rounded-lg w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
+        {/* 标题栏 */}
+        <div className="flex items-center justify-between p-6 border-b border-gray-700">
+          <h2 className="text-xl font-bold text-white">{isEdit ? '编辑项目' : '新建项目'}</h2>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-white transition-colors"
+          >
+            <X size={24} />
+          </button>
+        </div>
+
+        {/* 表单内容 */}
+        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6">
+          <div className="space-y-4">
+            {/* 基本信息 */}
+            <div>
+              <label className="block text-white font-semibold mb-2">
+                项目名称 <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="text"
+                required
+                value={formData.name}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                placeholder="请输入项目名称"
+              />
+            </div>
+
+            <div>
+              <label className="block text-white font-semibold mb-2">项目描述</label>
+              <textarea
+                value={formData.description}
+                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                placeholder="请输入项目描述"
+                rows={3}
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-white font-semibold mb-2">项目经理</label>
+                <input
+                  type="text"
+                  value={formData.manager}
+                  onChange={(e) => setFormData({ ...formData, manager: e.target.value })}
+                  className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                  placeholder="请输入项目经理"
+                />
+              </div>
+
+              <div>
+                <label className="block text-white font-semibold mb-2">项目状态</label>
+                <select
+                  value={formData.status}
+                  onChange={(e) => setFormData({ ...formData, status: e.target.value })}
+                  className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                >
+                  <option value="active">进行中</option>
+                  <option value="completed">已完成</option>
+                  <option value="paused">已暂停</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-white font-semibold mb-2">所属分公司</label>
+              <select
+                value={formData.branch_id || ''}
+                onChange={(e) => setFormData({ ...formData, branch_id: e.target.value ? Number(e.target.value) : undefined })}
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+              >
+                <option value="">无 (直属总部)</option>
+                {availableBranches.map((branch) => (
+                  <option key={branch.id} value={branch.id}>
+                    {branch.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* 关联选择 */}
+            <div>
+              <label className="block text-white font-semibold mb-2">项目人员</label>
+              <select
+                multiple
+                value={formData.user_ids.map(String)}
+                onChange={(e) => {
+                  const selected = Array.from(e.target.selectedOptions, (opt: HTMLOptionElement) =>
+                    parseInt(opt.value)
+                  );
+                  setFormData({ ...formData, user_ids: selected });
+                }}
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                size={5}
+              >
+                {availableUsers.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.full_name || user.username} ({user.username})
+                  </option>
+                ))}
+              </select>
+              <p className="text-gray-400 text-xs mt-1">按住 Ctrl/Cmd 可多选</p>
+            </div>
+
+            <div>
+              <label className="block text-white font-semibold mb-2">项目设备</label>
+              <select
+                multiple
+                value={formData.device_ids}
+                onChange={(e) => {
+                  const selected = Array.from(e.target.selectedOptions, (opt: HTMLOptionElement) => opt.value);
+                  setFormData({ ...formData, device_ids: selected });
+                }}
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                size={5}
+              >
+                {availableDevices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.device_name} ({device.id}) - {device.is_online ? '在线' : '离线'}
+                  </option>
+                ))}
+              </select>
+              <p className="text-gray-400 text-xs mt-1">按住 Ctrl/Cmd 可多选</p>
+            </div>
+
+            <div>
+              <label className="block text-white font-semibold mb-2">项目区域</label>
+              <select
+                multiple
+                value={formData.region_ids.map(String)}
+                onChange={(e) => {
+                  const selected = Array.from(e.target.selectedOptions, (opt: HTMLOptionElement) =>
+                    parseInt(opt.value)
+                  );
+                  setFormData({ ...formData, region_ids: selected });
+                }}
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                size={5}
+              >
+                {availableRegions.map((region) => (
+                  <option key={region.id} value={region.id}>
+                    {region.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-gray-400 text-xs mt-1">按住 Ctrl/Cmd 可多选</p>
+            </div>
+
+            <div>
+              <label className="block text-white font-semibold mb-2">备注</label>
+              <textarea
+                value={formData.remark}
+                onChange={(e) => setFormData({ ...formData, remark: e.target.value })}
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                placeholder="请输入备注"
+                rows={2}
+              />
+            </div>
+          </div>
+
+          {/* 操作按钮 */}
+          <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-gray-700">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-6 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg transition-colors"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {loading && <Loader2 className="animate-spin" size={16} />}
+              {isEdit ? '保存' : '创建'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

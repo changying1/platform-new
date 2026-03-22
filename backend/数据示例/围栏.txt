@@ -1,0 +1,26 @@
+创建围栏：
+
+// 多边形
+{
+  "name": "一号工地",
+  "shape": "polygon",
+  "coordinates_json": "[[30.1, 120.1], [30.2, 120.2], [30.1, 120.3]]",
+  "radius": null,
+  "effective_time": "00:00-24:00",
+  "remark": "施工区域",
+  "alarm_type": "medium"
+}
+
+// 圆形
+{
+  "name": "高压塔禁区",
+  "shape": "circle",
+  "coordinates_json": "[30.15, 120.15]", 
+  "radius": 200.5,
+  "effective_time": "00:00-24:00",
+  "remark": "高压危险，半径200米",
+  "alarm_type": "high"
+}
+
+高德地图坐标格式：GCJ-02
+原始GPS坐标格式：WGS-84

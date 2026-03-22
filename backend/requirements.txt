@@ -1,0 +1,30 @@
+﻿# --- 核心 AI 框架 ---
+# 关键：强制锁定 NumPy 在 1.x 版本，防止 OpenCV 崩溃
+numpy<2.0.0
+
+# 必须使用最新版 Ultralytics 以支持 PyTorch 2.6+
+ultralytics>=8.3.0
+
+# 基础 AI 依赖 (新版支持 Python 3.12)
+torch>=2.2.0
+torchvision>=0.17.0
+
+# --- 图像处理与工具 ---
+# 指定高版本以支持 Python 3.12，但它会依赖上面的 numpy<2
+opencv-python-headless>=4.10.0.84
+shapely>=2.0.3
+scikit-learn>=1.4.0
+pillow>=10.0.0
+
+# --- Web 后端基础 (保留你原有的) ---
+flask
+flask-cors
+python-dotenv
+requests
+pymysql
+cryptography
+onvif-zeep
+
+fastapi
+uvicorn[standard]
+sqlalchemy

@@ -1,0 +1,7 @@
+{
+  "name": "Smart Helmet Platform",
+  "description": "A comprehensive management platform for smart safety helmets, featuring live tracking, video monitoring, and electronic fence management.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
