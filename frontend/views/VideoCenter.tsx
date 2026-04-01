@@ -732,11 +732,27 @@ export default function VideoCenter() {
     currentPage * itemsPerPage
   );
 
+  const isEzvizCloudDevice = useCallback((device?: Video | null) => {
+    if (!device) return false;
+    return (
+      String(device.platform_type || "").toLowerCase() === "ezviz" ||
+      String(device.access_source || "").toLowerCase() === "cloud" ||
+      !!device.device_serial
+    );
+  }, []);
+
   const handleShowStream = async (device: Video) => {
     try {
       // 全屏播放时总是拉取最新地址，避免设备配置切换后复用旧缓存。
       const info = await getVideoStreamUrl(device.id);
-      setPreviewStreams((prev) => ({ ...prev, [device.id]: info }));
+      // 同一设备仅保留一个播放会话：全屏时主动清掉对应预览流。
+      setPreviewStreams((prev) => {
+        const next = { ...prev };
+        delete next[device.id];
+        return next;
+      });
+      setPreviewLoading((prev) => ({ ...prev, [device.id]: false }));
+      setPreviewErrors((prev) => ({ ...prev, [device.id]: "" }));
       setStreamInfo(info);
       setStreamUrl(info.url);
       setMaximizedVideo(device);
@@ -747,6 +763,9 @@ export default function VideoCenter() {
 
   const loadPreviewStream = useCallback(
     async (device: Video) => {
+      if (isEzvizCloudDevice(device)) {
+        return;
+      }
       if (maximizedVideo?.id === device.id) {
         return;
       }
@@ -767,7 +786,7 @@ export default function VideoCenter() {
         setPreviewLoading((prev) => ({ ...prev, [device.id]: false }));
       }
     },
-    [maximizedVideo?.id, previewLoading, previewStreams]
+    [isEzvizCloudDevice, maximizedVideo?.id, previewLoading, previewStreams]
   );
 
   useEffect(() => {
@@ -1227,6 +1246,17 @@ export default function VideoCenter() {
                           <div className="h-full w-full flex items-center justify-center text-cyan-200 text-xs bg-slate-950/70">
                             当前设备正在全屏播放，已暂停预览拉流
                           </div>
+                        ) : isEzvizCloudDevice(device) ? (
+                          <button
+                            className="h-full w-full flex flex-col items-center justify-center gap-2 text-slate-200 text-sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleShowStream(device);
+                            }}
+                          >
+                            <span>萤石云设备默认不自动预览</span>
+                            <span className="text-cyan-300 text-xs">点击开始单路播放</span>
+                          </button>
                         ) : previewStreams[device.id] ? (
                           <VideoPlayer
                             key={previewStreams[device.id].url}
