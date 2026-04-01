@@ -292,11 +292,6 @@ export default function VideoCenter() {
     console.error(err);
   }, []);
 
-  const handleVideoPlayerError = useCallback((err: string) => {
-    // 定向验证：仅上报错误，不做 clear cache / forceRefresh / setStreamUrl。
-    console.error("VideoPlayer error:", err);
-  }, []);
-
   const currentWorkDurationSeconds = maximizedVideo
     ? workDurationByDevice[maximizedVideo.id] ?? getVideoWorkDurationSeconds(maximizedVideo)
     : undefined;
@@ -738,19 +733,14 @@ export default function VideoCenter() {
   );
 
   const handleShowStream = async (device: Video) => {
-    // 先打开弹窗并展示加载态，避免网络慢时看起来“按钮无响应”。
-    setMaximizedVideo(device);
-    setStreamUrl(null);
-    setStreamInfo(null);
-
     try {
       // 全屏播放时总是拉取最新地址，避免设备配置切换后复用旧缓存。
-      const info = await getVideoStreamUrl(device.id, { forceRefresh: true });
+      const info = await getVideoStreamUrl(device.id);
       setPreviewStreams((prev) => ({ ...prev, [device.id]: info }));
       setStreamInfo(info);
       setStreamUrl(info.url);
+      setMaximizedVideo(device);
     } catch (err: any) {
-      setMaximizedVideo(null);
       alert(`获取视频流失败: ${err.message}`);
     }
   };
@@ -1757,12 +1747,7 @@ export default function VideoCenter() {
                   </div>
                   <div className="flex-1 flex items-center justify-center bg-black relative min-h-0">
                     <div className="relative w-full h-full">
-                      <VideoPlayer
-                        src={streamUrl}
-                        playType={streamInfo?.play_type}
-                        accessToken={streamInfo?.access_token}
-                        onError={handleVideoPlayerError}
-                      />
+                      <VideoPlayer src={streamUrl} playType={streamInfo?.play_type} accessToken={streamInfo?.access_token} />
                       <canvas
                       id="aiCanvas"
                       ref={aiCanvasRef}

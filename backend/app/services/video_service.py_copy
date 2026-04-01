@@ -95,6 +95,12 @@ PLAYBACK_ARCHIVE_LOOKBACK_HOURS = max(PLAYBACK_ARCHIVE_WINDOW_HOURS, int(os.gete
 PERIODIC_ARCHIVE_LAST_RUN_AT: Dict[int, float] = {}
 EZVIZ_PRESET_UNSUPPORTED_DEVICES: Set[int] = set()
 
+# [新增] 全局缓存：存储流媒体地址，避免频繁请求萤石云API导致并发数达到上限
+# 缓存结构：{video_id: {"url": str, "expired_at": float, "play_type": str, ...}}
+STREAM_URL_CACHE: Dict[int, Dict[str, Any]] = {}
+STREAM_URL_CACHE_LOCK = threading.Lock()
+STREAM_CACHE_VALID_SECONDS = int(os.getenv("VIDEO_STREAM_CACHE_SECONDS", "3300"))  # 缓存有效期3300秒（比token 3600秒短一点）
+
 class VideoService:
     def _get_ezviz_config(self) -> tuple[str, str, str]:
         # 运行时读取环境变量，避免导入时机导致配置值为空。
@@ -596,8 +602,7 @@ class VideoService:
         is_running = False
         if entry is not None:
             try:
-                process = entry.get("process") if isinstance(entry, dict) else entry
-                is_running = process is not None and process.poll() is None
+                is_running = entry.poll() is None
             except Exception:
                 is_running = False
 
@@ -653,11 +658,8 @@ class VideoService:
         if not device_serial:
             raise ValueError("UPSTREAM_ERROR: 云设备缺少 device_serial")
 
-        # 恢复云直连：优先 ezopen，再按设备偏好尝试其他协议。
-        protocol_candidates = [1, 2, 4, 3]
-        preferred_code = STREAM_PROTOCOL_MAP.get(protocol_name)
-        if preferred_code and preferred_code in protocol_candidates:
-            protocol_candidates = [preferred_code] + [c for c in protocol_candidates if c != preferred_code]
+        preferred_code = STREAM_PROTOCOL_MAP[protocol_name]
+        protocol_candidates = [preferred_code] + [c for c in [1, 2, 3, 4] if c != preferred_code]
 
         url = ""
         last_error: Optional[Exception] = None
@@ -767,8 +769,24 @@ class VideoService:
 
     def get_stream_info(self, db: Session, video_id: int):
         """
-        获取流媒体地址。
+        获取流媒体地址，优先使用缓存避免频繁请求萤石云API。
+        
+        key point: 缓存机制可大幅降低萤石云并发连接数，解决免费版并发数限制问题。
         """
+        global STREAM_URL_CACHE
+
+        # 1. 检查缓存是否有效
+        now = time.time()
+        if video_id in STREAM_URL_CACHE:
+            cached = STREAM_URL_CACHE[video_id]
+            if cached.get("expired_at", 0) > now:
+                logger.info(f"✅ 命中流地址缓存 video_id={video_id}")
+                return cached["data"]
+            else:
+                # 缓存已过期，清理
+                del STREAM_URL_CACHE[video_id]
+
+        # 2. 缓存未命中，从数据库和云平台获取
         db_video = db.query(VideoDevice).filter(VideoDevice.id == video_id).first()
         if not db_video:
             return None
@@ -778,7 +796,17 @@ class VideoService:
                 data = self._get_stream_info_ezviz(db_video)
             else:
                 data = self._get_stream_info_local(db_video)
-
+            
+            # 3. 缓存结果
+            if data and data.get("url"):
+                with STREAM_URL_CACHE_LOCK:
+                    STREAM_URL_CACHE[video_id] = {
+                        "data": data,
+                        "expired_at": now + STREAM_CACHE_VALID_SECONDS,
+                        "cached_at": now,
+                    }
+                logger.info(f"📝 缓存流地址 video_id={video_id}, 有效期={STREAM_CACHE_VALID_SECONDS}秒")
+            
             return data
         except Exception as e:
             logger.error(f"获取流地址失败 video_id={video_id}: {e}")
@@ -1225,7 +1253,7 @@ class VideoService:
     # -------------------------------------------------------------------------
     # [新功能] V4 极速推流 + 进程管理
     # -------------------------------------------------------------------------
-    def start_ffmpeg_stream(self, source_url: str, stream_name: str):
+    def start_ffmpeg_stream(self, rtsp_url: str, stream_name: str):
         """
         启动 FFmpeg 推流 (隐藏窗口 + 全局管理)
         """
@@ -1235,31 +1263,15 @@ class VideoService:
         ffmpeg_path = self._get_ffmpeg_path()
         rtmp_url = f"rtmp://127.0.0.1:19350/live/{stream_name}"
         
-        source_lower = str(source_url or "").lower()
-        input_options: list[str] = []
-        if source_lower.startswith("rtsp://"):
-            input_options = [
-                "-f", "rtsp", "-rtsp_transport", "tcp",
-                "-user_agent", "LIVE555 Streaming Media v2013.02.11",
-                "-fflags", "nobuffer", "-flags", "low_delay",
-                "-strict", "experimental",
-                "-analyzeduration", "100000", "-probesize", "100000",
-            ]
-        elif source_lower.startswith("http://") or source_lower.startswith("https://") or source_lower.startswith("rtmp://") or source_lower.startswith("rtmps://"):
-            # 云地址在网络抖动时容易断开，启用 ffmpeg 输入层自动重连减少 publish/play 频繁关闭。
-            input_options = [
-                "-reconnect", "1",
-                "-reconnect_at_eof", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "2",
-                "-rw_timeout", "15000000",
-            ]
-
         # V4 完美配置
         command = [
             ffmpeg_path, "-y",
-            *input_options,
-            "-i", source_url,
+            "-f", "rtsp", "-rtsp_transport", "tcp",
+            "-user_agent", "LIVE555 Streaming Media v2013.02.11",
+            "-fflags", "nobuffer", "-flags", "low_delay",
+            "-strict", "experimental",
+            "-analyzeduration", "100000", "-probesize", "100000",
+            "-i", rtsp_url,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
             "-b:v", "4000k", "-maxrate", "6000k", "-bufsize", "1000k",
             "-pix_fmt", "yuv420p", "-g", "15",
@@ -1270,7 +1282,6 @@ class VideoService:
 
         logger.info(f"Starting FFmpeg Stream for {stream_name}...")
         
-        relay_log_file = None
         try:
             # [修改关键点] 隐藏 CMD 窗口
             startupinfo = None
@@ -1280,33 +1291,19 @@ class VideoService:
                 # Windows 下使用 CREATE_NO_WINDOW (0x08000000) 彻底隐藏
                 creationflags = 0x08000000 
 
-            relay_log_root = os.path.join(os.path.dirname(self._get_record_root()), "logs")
-            os.makedirs(relay_log_root, exist_ok=True)
-            relay_log_path = os.path.join(relay_log_root, f"relay_{stream_name}.log")
-            relay_log_file = open(relay_log_path, "a", encoding="utf-8")
-
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL, 
-                stderr=relay_log_file,
+                stderr=subprocess.DEVNULL,
                 creationflags=creationflags
             )
-
+            
             # [新增] 存入全局字典
-            FFMPEG_PROCESSES[stream_name] = {
-                "process": process,
-                "source_url": source_url,
-                "log_file": relay_log_file,
-                "log_path": relay_log_path,
-            }
+            FFMPEG_PROCESSES[stream_name] = process
             logger.info(f"Stream {stream_name} started (PID: {process.pid})")
             
             return process
         except Exception as e:
-            try:
-                relay_log_file.close()
-            except Exception:
-                pass
             logger.error(f"FFmpeg start failed: {e}")
             return None
 
@@ -1315,12 +1312,7 @@ class VideoService:
         [新增] 停止并清理 FFmpeg 进程
         """
         global FFMPEG_PROCESSES
-        entry = FFMPEG_PROCESSES.get(stream_name)
-        if not entry:
-            return
-
-        process = entry.get("process") if isinstance(entry, dict) else entry
-        log_file = entry.get("log_file") if isinstance(entry, dict) else None
+        process = FFMPEG_PROCESSES.get(stream_name)
 
         if process:
             try:
@@ -1337,11 +1329,6 @@ class VideoService:
                 # 无论如何从字典中移除
                 if stream_name in FFMPEG_PROCESSES:
                     del FFMPEG_PROCESSES[stream_name]
-                if log_file:
-                    try:
-                        log_file.close()
-                    except Exception:
-                        pass
 
     def _sanitize_stream_name(self, name: str) -> str:
         return name.replace(" ", "_").replace("/", "_").replace("\\", "_").lower()
@@ -1472,29 +1459,6 @@ class VideoService:
             pass
 
         return raw
-
-    def _is_nms_stream_ready(self, stream_name: str) -> bool:
-        try:
-            resp = requests.get(
-                f"{NMS_HOST}/api/streams",
-                auth=(NMS_USER, NMS_PASS),
-                timeout=2,
-            )
-            if resp.status_code != 200:
-                return False
-            payload = resp.json() if resp.content else {}
-            live = payload.get("live") or {}
-            return str(stream_name) in live
-        except Exception:
-            return False
-
-    def _wait_nms_stream_ready(self, stream_name: str, timeout_seconds: float = 6.0) -> bool:
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline:
-            if self._is_nms_stream_ready(stream_name):
-                return True
-            time.sleep(0.25)
-        return False
 
     def start_ffmpeg_recording(self, video_id: int, source_url: str):
         if not source_url:
