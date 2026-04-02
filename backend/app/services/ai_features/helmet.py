@@ -3,6 +3,7 @@ from .registry import ai_rule
 @ai_rule("helmet", "安全帽类")
 
 def detect_safety_helmet(service, frame):
+    """基于 YOLO26 双模型检测人员是否佩戴安全帽（支持多目标）"""
     if frame is None:
         return False, None
 
@@ -14,23 +15,51 @@ def detect_safety_helmet(service, frame):
             service._debug_box(frame),
         )
 
-    if service.model is None and not service._load_model_safe():
-        return False, None
-
     try:
-        results = service.model(frame, conf=0.5, verbose=False)[0]
-        for box in results.boxes:
-            cls_id = int(box.cls[0])
-            label = service._label_of(results, cls_id)
-            if label == "no_helmet":
-                conf_score = float(box.conf[0])
-                coords = box.xyxy[0].tolist()
-                return service._check_cooldown_and_alarm(
-                    "未佩戴安全帽",
-                    "检测到人员未佩戴安全帽",
-                    conf_score,
-                    coords,
-                )
+        result = service._dual_detect(frame, conf=0.1)
+        if result is None:
+            return False, None
+
+        detected_types = result["detected_types"]
+        all_boxes = result["all_boxes"]
+
+        # 需要有人员相关信号才进行判定
+        has_person_signal = any(
+            t in ['person', 'helmet', 'head', 'Smoking'] for t in detected_types
+        )
+        if not has_person_signal:
+            return False, None
+
+        # 检测到 helmet → 合规，不报警
+        if 'helmet' in detected_types:
+            return False, None
+
+        # 未检测到 helmet，收集所有 person/head 框作为违规目标
+        if any(t in ['person', 'head', 'Smoking'] for t in detected_types):
+            violation_boxes = []
+            for b in all_boxes:
+                if b["label"] in ['person', 'head']:
+                    violation_boxes.append({
+                        "type": "未佩戴安全帽",
+                        "msg": f"检测到人员未佩戴安全帽 ({b['conf']:.0%})",
+                        "score": b["conf"],
+                        "coords": b["coords"],
+                    })
+
+            # 如果没有 person/head 框但有 Smoking 框，用 Smoking 框代替
+            if not violation_boxes:
+                for b in all_boxes:
+                    if b["label"] == 'Smoking':
+                        violation_boxes.append({
+                            "type": "未佩戴安全帽",
+                            "msg": f"检测到人员未佩戴安全帽",
+                            "score": b["conf"],
+                            "coords": b["coords"],
+                        })
+
+            if violation_boxes:
+                return service._check_cooldown_and_multi_alarm("未佩戴安全帽", violation_boxes)
+
         return False, None
     except Exception as e:
         print(f"⚠️ 安全帽检测出错: {e}")

@@ -41,7 +41,7 @@ def _ensure_zoom_direction(direction: str):
 class AIMonitorRequest(BaseModel):
     device_id: str
     rtsp_url: str | None = None
-    algo_type: str = "helmet"
+    algo_type: str = "helmet,smoking"
 
 
 class PlaybackSaveRequest(BaseModel):
@@ -73,7 +73,7 @@ async def start_ai(req: AIMonitorRequest, db: Session = Depends(get_db)):
     if (not has_valid_rtsp) and (not is_ezviz_cloud):
         raise HTTPException(status_code=400, detail="缺少有效 RTSP，且当前设备非萤石云设备，无法启动AI检测")
 
-    algo_type = str(req.algo_type or "").strip() or "helmet"
+    algo_type = str(req.algo_type or "").strip() or "helmet,smoking"
     success = ai_manager.start_monitoring(device_id, rtsp_url if has_valid_rtsp else "", algo_type)
     if success:
         return {"code": 200, "message": f"AI监控已启动: {algo_type}"}
@@ -95,6 +95,8 @@ def get_ai_rules():
     
     allowed_keys = [
         "helmet",
+        "smoking",
+        "face_recognition",
         "signage",
         "supervisor_count",
         "ladder_angle",
@@ -105,6 +107,8 @@ def get_ai_rules():
     # 统一转换显示名称（覆盖后端定义，匹配前端要求）
     display_names = {
         "helmet": "安全帽类",
+        "smoking": "抽烟检测",
+        "face_recognition": "人脸识别",
         "signage": "现场标识类",
         "supervisor_count": "现场监督人数统计",
         "ladder_angle": "梯子角度类",

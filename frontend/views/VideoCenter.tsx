@@ -617,6 +617,19 @@ export default function VideoCenter() {
           }
 
           const { boxes, alarmLike } = parseAlarmPayload(data);
+
+          // 人脸识别：只画框显示 5 秒，不弹窗、不响声
+          if (alarmLike?.face_recognition && boxes.length) {
+            setAlarmBoxes(boxes);
+            if (alarmBoxesClearTimerRef.current) {
+              window.clearTimeout(alarmBoxesClearTimerRef.current);
+            }
+            alarmBoxesClearTimerRef.current = window.setTimeout(() => {
+              setAlarmBoxes([]);
+            }, 5000);
+            return;
+          }
+
           const isAlarm = Boolean(
             boxes.length ||
               alarmLike?.alarm ||

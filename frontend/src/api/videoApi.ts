@@ -694,7 +694,7 @@ export async function getAlarmPlaybackVideos(
 // --- 找到 frontend/src/api/videoApi.ts 文件，在末尾添加以下内容 ---
 
 // 1. 开启 AI 监控
-export const startAIMonitoring = async (deviceId: string, rtspUrl: string, algoType: string = "helmet") => {
+export const startAIMonitoring = async (deviceId: string, rtspUrl: string, algoType: string = "helmet,smoking") => {
   const response = await fetch(`${API_BASE_URL}/video/ai/start`, {
     method: 'POST',
     headers: {

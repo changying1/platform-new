@@ -76,7 +76,7 @@ class AIManager:
 
         return normalized, normalized
 
-    def start_monitoring(self, device_id, rtsp_url, algo_type="helmet"):
+    def start_monitoring(self, device_id, rtsp_url, algo_type="helmet,smoking"):
         device_id = str(device_id)
 
         if device_id in self.active_monitors:

@@ -10,9 +10,21 @@ import asyncio
 
 
 class AIService:
-    def __init__(self, model_path="app/models/best.pt", cooldown_seconds=5, shared_cooldown_map=None):
+    def __init__(self, model_path="app/models/best.pt",
+                 model_a_path="app/models/yolo26_person.pt",
+                 model_b_path="app/models/yolo26_helmet.pt",
+                 cooldown_seconds=5, shared_cooldown_map=None):
         self.model_path = model_path
         self.model = None
+
+        # YOLO26 双模型（安全帽 + 抽烟检测）
+        self.model_a_path = model_a_path   # Person模型: Smoking, helmet, person
+        self.model_b_path = model_b_path   # Helmet模型: Smoking, head, helmet
+        self.model_a = None
+        self.model_b = None
+        # 帧级缓存，同一帧多个算法调用时避免重复推理
+        self._last_frame_id = None
+        self._last_dual_results = None
 
         self.cooldown_seconds = cooldown_seconds
         # 如果传入共享映射则用共享的，否则用实例私有的（兼容旧调用）
@@ -82,6 +94,79 @@ class AIService:
             print(f"❌ [严重错误] 模型加载失败: {e}")
             return False
 
+    # ===== YOLO26 双模型加载与推理 =====
+
+    def _load_dual_models_safe(self):
+        """加载 YOLO26 双模型（Person + Helmet）"""
+        if self.model_a is not None and self.model_b is not None:
+            return True
+        try:
+            base_dir = os.getcwd()
+            if self.model_a is None:
+                path_a = os.path.join(base_dir, self.model_a_path)
+                if not os.path.exists(path_a):
+                    print(f"❌ [错误] 找不到Person模型: {path_a}")
+                    return False
+                print("⏳ [AI服务] 正在加载Person模型(A) (CPU模式)...")
+                self.model_a = YOLO(path_a)
+                self.model_a.to("cpu")
+                print("✅ [AI服务] Person模型(A)加载完成")
+
+            if self.model_b is None:
+                path_b = os.path.join(base_dir, self.model_b_path)
+                if not os.path.exists(path_b):
+                    print(f"❌ [错误] 找不到Helmet模型: {path_b}")
+                    return False
+                print("⏳ [AI服务] 正在加载Helmet模型(B) (CPU模式)...")
+                self.model_b = YOLO(path_b)
+                self.model_b.to("cpu")
+                print("✅ [AI服务] Helmet模型(B)加载完成")
+
+            return True
+        except Exception as e:
+            print(f"❌ [严重错误] 双模型加载失败: {e}")
+            return False
+
+    def _dual_detect(self, frame, conf=0.1):
+        """
+        YOLO26 双模型推理，返回合并后的检测结果。
+        同一帧多次调用时使用缓存，避免重复推理。
+        返回: dict {"all_boxes": [...], "detected_types": set} 或 None
+        """
+        frame_id = id(frame)
+        if frame_id == self._last_frame_id and self._last_dual_results is not None:
+            return self._last_dual_results
+
+        if not self._load_dual_models_safe():
+            return None
+
+        res_a = self.model_a(frame, conf=conf, verbose=False)[0]
+        res_b = self.model_b(frame, conf=conf, verbose=False)[0]
+
+        all_boxes = []
+        detected_types = set()
+
+        for res in [res_a, res_b]:
+            for box in res.boxes:
+                cls_name = res.names[int(box.cls[0])]
+                conf_val = float(box.conf[0])
+                coords = box.xyxy[0].tolist()
+                all_boxes.append({
+                    "label": cls_name,
+                    "conf": conf_val,
+                    "coords": coords,
+                })
+                detected_types.add(cls_name)
+
+        result = {
+            "all_boxes": all_boxes,
+            "detected_types": detected_types,
+        }
+
+        self._last_frame_id = frame_id
+        self._last_dual_results = result
+        return result
+
     def _check_cooldown_and_alarm(self, alarm_type, msg, score, coords):
 
         now = time.time()
@@ -129,6 +214,21 @@ class AIService:
             # 在 AI 线程中安全触发异步推送，避免 no running event loop
             self._push_alarm_safe(data)
 
+            return True, data
+
+        return False, None
+
+    def _check_cooldown_and_multi_alarm(self, alarm_type, boxes):
+        """多目标版本：一次推送多个标框，共享冷却控制"""
+        now = time.time()
+        cooldown_key = alarm_type
+        last = self.last_alarm_time_map.get(cooldown_key, 0.0)
+
+        if now - last > self.cooldown_seconds:
+            self.last_alarm_time_map[cooldown_key] = now
+            data = {"alarm": True, "boxes": boxes}
+            self._push_alarm_safe(data)
+            print(f"🚨 [AI监测] 报警已发出! ({alarm_type}) [{len(boxes)}个目标]")
             return True, data
 
         return False, None
