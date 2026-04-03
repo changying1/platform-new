@@ -228,22 +228,50 @@ interface CacheEntry<T> {
   expiresIn: number; // 缓存有效期（毫秒）
 }
 
+interface GetVideoStreamOptions {
+  forceRefresh?: boolean;
+}
+
 const STREAM_URL_FRONTEND_CACHE: Map<number, CacheEntry<StreamUrl>> = new Map();
 const STREAM_URL_REQUEST_LOCKS: Map<number, Promise<StreamUrl>> = new Map();
+const STREAM_URL_CACHE_TTL_DEFAULT_MS = 55 * 60 * 1000;
+const STREAM_URL_CACHE_TTL_EZVIZ_MS = 30 * 1000;
+const ENABLE_STREAM_URL_FRONTEND_CACHE = false;
+
+function getStreamUrlCacheTtl(data: StreamUrl): number {
+  const playType = String(data.play_type || '').toLowerCase();
+  const platform = String(data.platform || '').toLowerCase();
+  const url = String(data.url || '').toLowerCase();
+  const isEzviz = platform === 'ezviz' || playType === 'ezopen' || url.startsWith('ezopen://') || !!data.access_token;
+  return isEzviz ? STREAM_URL_CACHE_TTL_EZVIZ_MS : STREAM_URL_CACHE_TTL_DEFAULT_MS;
+}
+
+export function clearVideoStreamUrlCache(videoId?: number): void {
+  if (typeof videoId === 'number') {
+    STREAM_URL_FRONTEND_CACHE.delete(videoId);
+    return;
+  }
+  STREAM_URL_FRONTEND_CACHE.clear();
+}
 
 /** 获取指定设备的视频流地址（带前端缓存） */
-export async function getVideoStreamUrl(videoId: number): Promise<StreamUrl> {
+export async function getVideoStreamUrl(videoId: number, options: GetVideoStreamOptions = {}): Promise<StreamUrl> {
   const now = Date.now();
+  const forceRefresh = !!options.forceRefresh;
+
+  if (!ENABLE_STREAM_URL_FRONTEND_CACHE || forceRefresh) {
+    STREAM_URL_FRONTEND_CACHE.delete(videoId);
+  }
   
   // 1. 检查前端缓存是否有效
   const cached = STREAM_URL_FRONTEND_CACHE.get(videoId);
-  if (cached && cached.timestamp + cached.expiresIn > now) {
+  if (ENABLE_STREAM_URL_FRONTEND_CACHE && !forceRefresh && cached && cached.timestamp + cached.expiresIn > now) {
     console.log(`[缓存命中] 视频流地址 video_id=${videoId}`);
     return cached.data;
   }
   
   // 2. 如果有进行中的请求，返回该 Promise，避免并发重复请求
-  if (STREAM_URL_REQUEST_LOCKS.has(videoId)) {
+  if (ENABLE_STREAM_URL_FRONTEND_CACHE && !forceRefresh && STREAM_URL_REQUEST_LOCKS.has(videoId)) {
     console.log(`[请求中] 等待视频流请求完成 video_id=${videoId}`);
     return STREAM_URL_REQUEST_LOCKS.get(videoId)!;
   }
@@ -251,21 +279,25 @@ export async function getVideoStreamUrl(videoId: number): Promise<StreamUrl> {
   // 3. 发起新请求并使用锁防止并发
   const requestPromise = (async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/video/stream/${videoId}`);
+      const response = await fetch(`${API_BASE_URL}/video/stream/${videoId}`, { cache: 'no-store' });
       if (!response.ok) {
         const error = await response.json();
         throw new Error(error.detail || 'Failed to get stream URL');
       }
       const data = await response.json();
+      const expiresIn = getStreamUrlCacheTtl(data);
       
-      // 4. 缓存结果（缓存 55 分钟，比后端的 3300 秒短一点）
-      STREAM_URL_FRONTEND_CACHE.set(videoId, {
-        data,
-        timestamp: now,
-        expiresIn: 55 * 60 * 1000,
-      });
-      
-      console.log(`[缓存保存] 视频流地址已缓存 video_id=${videoId}, 有效期=3300秒`);
+      // 4. 可选缓存结果（当前默认禁用，强制每次取最新地址）
+      if (ENABLE_STREAM_URL_FRONTEND_CACHE) {
+        STREAM_URL_FRONTEND_CACHE.set(videoId, {
+          data,
+          timestamp: Date.now(),
+          expiresIn,
+        });
+        console.log(`[缓存保存] 视频流地址已缓存 video_id=${videoId}, 有效期=${Math.round(expiresIn / 1000)}秒`);
+      } else {
+        console.log(`[实时拉流] video_id=${videoId}`);
+      }
       return data;
     } finally {
       // 5. 移除锁，允许后续请求
@@ -662,7 +694,7 @@ export async function getAlarmPlaybackVideos(
 // --- 找到 frontend/src/api/videoApi.ts 文件，在末尾添加以下内容 ---
 
 // 1. 开启 AI 监控
-export const startAIMonitoring = async (deviceId: string, rtspUrl: string, algoType: string = "helmet") => {
+export const startAIMonitoring = async (deviceId: string, rtspUrl: string, algoType: string = "helmet,smoking") => {
   const response = await fetch(`${API_BASE_URL}/video/ai/start`, {
     method: 'POST',
     headers: {

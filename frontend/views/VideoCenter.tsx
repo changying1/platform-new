@@ -40,8 +40,11 @@ import {
   startAIMonitoring,
   stopAIMonitoring,
   getAIRules,
+  getVideoMonitoringSummaries,
+  getVideoMonitoringSummary,
   AIRule,
   StreamUrl,
+  VideoMonitoringSummary,
 } from "../src/api/videoApi";
 import { API_BASE_URL } from "../src/api/config";
 
@@ -77,6 +80,77 @@ type VideoWithWorkDuration = Video & {
 };
 
 const WORK_DURATION_STORAGE_KEY = "video_center_work_duration_by_device";
+const DEFAULT_WEEKLY_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+
+const formatBytes = (value?: number) => {
+  const bytes = Math.max(0, Number(value || 0));
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let display = bytes;
+  let unitIndex = 0;
+
+  while (display >= 1024 && unitIndex < units.length - 1) {
+    display /= 1024;
+    unitIndex += 1;
+  }
+
+  return unitIndex === 0 ? `${Math.round(display)}${units[unitIndex]}` : `${display.toFixed(2)}${units[unitIndex]}`;
+};
+
+const bytesToGb = (value?: number) => {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return 2;
+  return Number((bytes / (1024 * 1024 * 1024)).toFixed(2));
+};
+
+const gbToBytes = (value: number) => {
+  const gb = Number(value || 0);
+  if (!Number.isFinite(gb) || gb <= 0) return DEFAULT_WEEKLY_QUOTA_BYTES;
+  return Math.max(1, Math.round(gb * 1024 * 1024 * 1024));
+};
+
+const getMainStatusLabel = (status?: string) => {
+  switch ((status || "").toLowerCase()) {
+    case "online":
+      return "在线";
+    case "sleeping":
+      return "待机/休眠";
+    case "offline":
+    default:
+      return "离线";
+  }
+};
+
+const getStatusTone = (status?: string, fault?: boolean) => {
+  const normalized = (status || "offline").toLowerCase();
+  if (normalized === "online" && !fault) return "text-emerald-300 border-emerald-400/35 bg-emerald-500/15";
+  if (normalized === "sleeping") return "text-amber-200 border-amber-400/35 bg-amber-500/15";
+  return "text-rose-200 border-rose-400/35 bg-rose-500/15";
+};
+
+const getTagLabel = (tag: string) => {
+  switch (tag) {
+    case "privacy_enabled":
+      return "隐私开启";
+    case "storage_abnormal":
+      return "存储异常";
+    case "low_battery":
+      return "低电量";
+    case "weak_signal":
+      return "信号弱";
+    case "alarm_active":
+      return "异常告警中";
+    default:
+      return tag;
+  }
+};
+
+const getMonitoringSummaryMap = (summaries: VideoMonitoringSummary[]) => {
+  const map: Record<number, VideoMonitoringSummary> = {};
+  summaries.forEach((item) => {
+    map[item.device_id] = item;
+  });
+  return map;
+};
 
 const getVideoWorkDurationSeconds = (video?: Video | null) => {
   if (!video) return undefined;
@@ -211,12 +285,15 @@ export default function VideoCenter() {
     { id: "unauthorized_person", name: "围栏入侵管理类" },
   ]);
   const [devices, setDevices] = useState<Video[]>([]);
+  const [monitoringByDevice, setMonitoringByDevice] = useState<Record<number, VideoMonitoringSummary>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [maximizedVideo, setMaximizedVideo] = useState<Video | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [streamInfo, setStreamInfo] = useState<StreamUrl | null>(null);
+  const [currentMonitoring, setCurrentMonitoring] = useState<VideoMonitoringSummary | null>(null);
+  const monitoringRefreshTimerRef = useRef<number | null>(null);
   
   // --- ✅ 新增 AI 监控状态 ---
   const [isAIEnabled, setIsAIEnabled] = useState(false);
@@ -265,6 +342,7 @@ export default function VideoCenter() {
     ptz_source: "onvif",
     device_serial: "",
     channel_no: 1,
+    weekly_quota_bytes: DEFAULT_WEEKLY_QUOTA_BYTES,
     status: "offline",
     remark: "",
   });
@@ -282,6 +360,7 @@ export default function VideoCenter() {
     ptz_source: "onvif",
     device_serial: "",
     channel_no: 1,
+    weekly_quota_bytes: DEFAULT_WEEKLY_QUOTA_BYTES,
     status: "offline",
     remark: "",
   });
@@ -365,6 +444,40 @@ export default function VideoCenter() {
   // --- ✅ 新增：切换摄像头时重置 AI 状态 ---
   useEffect(() => {
     setIsAIEnabled(false);
+  }, [maximizedVideo]);
+
+  // --- ✅ 新增：每小时刷新一次监控摘要（流量数据）---
+  useEffect(() => {
+    if (!maximizedVideo) {
+      if (monitoringRefreshTimerRef.current) {
+        window.clearInterval(monitoringRefreshTimerRef.current);
+        monitoringRefreshTimerRef.current = null;
+      }
+      setCurrentMonitoring(null);
+      return;
+    }
+
+    const fetchMonitoring = async () => {
+      try {
+        const data = await getVideoMonitoringSummary(maximizedVideo.id);
+        setCurrentMonitoring(data);
+      } catch (err) {
+        console.error(`获取流量数据失败: ${err}`);
+      }
+    };
+
+    // 立即拉取一次
+    fetchMonitoring();
+
+    // 每小时刷新一次（3600000 毫秒）
+    monitoringRefreshTimerRef.current = window.setInterval(fetchMonitoring, 3600000);
+
+    return () => {
+      if (monitoringRefreshTimerRef.current) {
+        window.clearInterval(monitoringRefreshTimerRef.current);
+        monitoringRefreshTimerRef.current = null;
+      }
+    };
   }, [maximizedVideo]);
 
   // --- ✅ 改进：AI 开关处理逻辑 ---
@@ -719,8 +832,12 @@ export default function VideoCenter() {
   const fetchDevices = async () => {
     try {
       setLoading(true);
-      const data = await getAllVideos();
+      const [data, monitoring] = await Promise.all([
+        getAllVideos(),
+        getVideoMonitoringSummaries().catch(() => []),
+      ]);
       setDevices(data);
+      setMonitoringByDevice(getMonitoringSummaryMap(monitoring));
       setError(null);
     } catch (e: any) {
       setError("无法加载设备。请确认后端服务已启动。");
@@ -856,21 +973,24 @@ export default function VideoCenter() {
       ptz_source: isEzviz ? "ezviz" : "onvif",
       device_serial: newDeviceForm.device_serial || undefined,
       channel_no: newDeviceForm.channel_no || 1,
+      weekly_quota_bytes: newDeviceForm.weekly_quota_bytes || DEFAULT_WEEKLY_QUOTA_BYTES,
     };
 
     try {
-      const newDevice = isEzviz
-        ? await createVideo({
-            ...commonPayload,
-            stream_url: "",
-            rtsp_url: undefined,
-            status: "online",
-          })
-        : await addCameraViaRTSP({
-            ...commonPayload,
-            rtsp_url: newDeviceForm.stream_url || "",
-          });
-      setDevices([newDevice, ...devices]);
+      if (isEzviz) {
+        await createVideo({
+          ...commonPayload,
+          stream_url: "",
+          rtsp_url: undefined,
+          status: "online",
+        });
+      } else {
+        await addCameraViaRTSP({
+          ...commonPayload,
+          rtsp_url: newDeviceForm.stream_url || "",
+        });
+      }
+      await fetchDevices();
       setShowAddModal(false);
       setNewDeviceForm({
         name: "",
@@ -885,6 +1005,7 @@ export default function VideoCenter() {
         ptz_source: "onvif",
         device_serial: "",
         channel_no: 1,
+        weekly_quota_bytes: DEFAULT_WEEKLY_QUOTA_BYTES,
         status: "offline",
         remark: "",
       });
@@ -911,6 +1032,7 @@ export default function VideoCenter() {
       ptz_source: device.ptz_source || "onvif",
       device_serial: device.device_serial || "",
       channel_no: device.channel_no || 1,
+      weekly_quota_bytes: device.weekly_quota_bytes || DEFAULT_WEEKLY_QUOTA_BYTES,
       status: device.status,
       remark: device.remark || "",
     });
@@ -934,16 +1056,14 @@ export default function VideoCenter() {
     }
 
     try {
-      const updatedDevice = await updateVideo(editingDevice.id, {
+      await updateVideo(editingDevice.id, {
         ...editDeviceForm,
         access_source: isEzviz ? "cloud" : "local",
         ptz_source: isEzviz ? "ezviz" : "onvif",
         rtsp_url: isEzviz ? undefined : editDeviceForm.stream_url,
         stream_url: undefined,
+        weekly_quota_bytes: editDeviceForm.weekly_quota_bytes || DEFAULT_WEEKLY_QUOTA_BYTES,
       });
-      setDevices(
-        devices.map((d) => (d.id === editingDevice.id ? updatedDevice : d))
-      );
       setPreviewStreams((prev) => {
         const next = { ...prev };
         delete next[editingDevice.id];
@@ -954,6 +1074,7 @@ export default function VideoCenter() {
         delete next[editingDevice.id];
         return next;
       });
+      await fetchDevices();
       setShowEditModal(false);
       setEditingDevice(null);
     } catch (err: any) {
@@ -966,7 +1087,7 @@ export default function VideoCenter() {
     if (confirm(`确定删除设备 ID: ${id} 吗？`)) {
       try {
         await deleteVideo(id);
-        setDevices((prev) => prev.filter((d) => d.id !== id));
+        await fetchDevices();
       } catch (err: any) {
         alert(`删除失败: ${err.message}`);
       }
@@ -1184,7 +1305,9 @@ export default function VideoCenter() {
             onChange={(e) => handleSearch(e.target.value)}
           />
           <div className="flex-1 overflow-y-auto space-y-2 max-h-[calc(100vh-15rem)] vc-scrollbar pr-1">
-          {filteredDevices.map((device) => (
+          {filteredDevices.map((device) => {
+            const monitoring = monitoringByDevice[device.id];
+            return (
             <div
               key={device.id}
               onClick={() => setSelectedDevice(device)}
@@ -1208,6 +1331,16 @@ export default function VideoCenter() {
                     </span>
                   )}
                 </div>
+                {monitoring && (
+                  <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+                    <span className={`px-1.5 py-0.5 rounded border ${getStatusTone(monitoring.main_status, monitoring.is_fault)}`}>
+                      {getMainStatusLabel(monitoring.main_status)}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded border border-cyan-300/20 bg-cyan-500/10 text-cyan-100">
+                      {monitoring.weekly_remaining_text} 剩余
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <button
@@ -1224,7 +1357,8 @@ export default function VideoCenter() {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
           </div>
         </div>
       </CyberPanel>
@@ -1241,6 +1375,7 @@ export default function VideoCenter() {
         >
           {Array.from({ length: itemsPerPage }).map((_, i) => {
             const device = currentVideos[i];
+            const monitoring = device ? monitoringByDevice[device.id] : undefined;
             return (
               <div
                 key={`${device?.id ?? "slot"}-${i}`}
@@ -1312,7 +1447,30 @@ export default function VideoCenter() {
                       <span className="text-[10px] bg-slate-900/80 px-1.5 py-0.5 rounded border border-blue-300/20 text-sky-200 uppercase">
                         {device.stream_protocol || "flv"}
                       </span>
+                      {monitoring && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${getStatusTone(monitoring.main_status, monitoring.is_fault)}`}>
+                          {getMainStatusLabel(monitoring.main_status)}
+                        </span>
+                      )}
                     </div>
+                    {monitoring && (
+                      <div className="absolute bottom-2 left-2 z-10 max-w-[70%] rounded-md border border-cyan-300/20 bg-slate-950/70 px-2 py-1 text-[10px] text-slate-100 backdrop-blur-sm">
+                        <div className="flex items-center gap-2">
+                          <span className="text-cyan-200">周额度 {formatBytes(monitoring.weekly_quota_bytes)}</span>
+                          <span className="text-slate-400">已用 {formatBytes(monitoring.weekly_used_bytes)}</span>
+                          <span className="text-emerald-200">剩余 {formatBytes(monitoring.weekly_remaining_bytes)}</span>
+                        </div>
+                        {monitoring.status_tags.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {monitoring.status_tags.slice(0, 3).map((tag) => (
+                              <span key={tag} className="rounded border border-amber-300/20 bg-amber-500/10 px-1 py-0.5 text-[9px] text-amber-100">
+                                {getTagLabel(tag)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {/* 悬浮操作栏 */}
                     <div className="absolute bottom-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                       <button
@@ -1524,6 +1682,27 @@ export default function VideoCenter() {
                   placeholder={newDeviceForm.platform_type === "ezviz" ? "萤石设备可留空" : "示例：rtsp://账号:密码@192.168.1.100:554/..."}
                 />
               </div>
+              <div className="col-span-2 rounded-lg border border-blue-300/20 bg-slate-950/35 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs font-semibold text-slate-300 block">周额度（GB）</label>
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    className="w-28 bg-slate-950/60 border border-blue-300/30 rounded p-2 text-sm focus:border-cyan-300 focus:ring-2 focus:ring-cyan-400/30 outline-none text-slate-100"
+                    value={bytesToGb(newDeviceForm.weekly_quota_bytes)}
+                    onChange={(e) =>
+                      setNewDeviceForm({
+                        ...newDeviceForm,
+                        weekly_quota_bytes: gbToBytes(parseFloat(e.target.value) || 0),
+                      })
+                    }
+                  />
+                </div>
+                <div className="mt-3 rounded border border-blue-300/15 bg-slate-950/55 px-3 py-2 text-xs text-slate-300">
+                  设备状态（待机/隐私/存储异常/低电量/信号弱）由系统自动检测，无需手工勾选。
+                </div>
+              </div>
               <div className="col-span-2">
                 <label className="text-xs font-semibold text-slate-300 block mb-1">备注</label>
                 <input
@@ -1705,6 +1884,27 @@ export default function VideoCenter() {
                   placeholder={editDeviceForm.platform_type === "ezviz" ? "萤石设备可留空" : "示例：rtsp://账号:密码@192.168.1.100:554/..."}
                 />
               </div>
+              <div className="col-span-2 rounded-lg border border-blue-300/20 bg-slate-950/35 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs font-semibold text-slate-300 block">周额度（GB）</label>
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    className="w-28 bg-slate-950/60 border border-blue-300/30 rounded p-2 text-sm focus:border-cyan-300 focus:ring-2 focus:ring-cyan-400/30 outline-none text-slate-100"
+                    value={bytesToGb(editDeviceForm.weekly_quota_bytes)}
+                    onChange={(e) =>
+                      setEditDeviceForm({
+                        ...editDeviceForm,
+                        weekly_quota_bytes: gbToBytes(parseFloat(e.target.value) || 0),
+                      })
+                    }
+                  />
+                </div>
+                <div className="mt-3 rounded border border-blue-300/15 bg-slate-950/55 px-3 py-2 text-xs text-slate-300">
+                  设备状态（待机/隐私/存储异常/低电量/信号弱）由系统自动检测，无需手工勾选。
+                </div>
+              </div>
               <div className="col-span-2">
                 <label className="text-xs font-semibold text-slate-300 block mb-1">备注</label>
                 <input
@@ -1829,6 +2029,52 @@ export default function VideoCenter() {
             {/* Right Sidebar: AI Control + PTZ */}
             {streamUrl && (
               <div className="w-80 flex flex-col gap-3 h-full">
+                {currentMonitoring && (
+                  <div className="bg-slate-900/75 rounded-lg border border-blue-300/25 p-4 shadow-lg shrink-0">
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <h3 className="font-bold text-slate-100 flex items-center gap-2">
+                        <ShieldAlert size={18} className="text-cyan-300" />
+                        监测概览
+                      </h3>
+                      <span className={`text-[10px] px-2 py-1 rounded border ${getStatusTone(currentMonitoring.main_status, currentMonitoring.is_fault)}`}>
+                        {getMainStatusLabel(currentMonitoring.main_status)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs text-slate-200">
+                      <div className="rounded-md border border-cyan-300/15 bg-slate-950/55 p-2">
+                        <div className="text-slate-400">周额度</div>
+                        <div className="mt-1 font-semibold text-cyan-200">{currentMonitoring.weekly_quota_text}</div>
+                      </div>
+                      <div className="rounded-md border border-cyan-300/15 bg-slate-950/55 p-2">
+                        <div className="text-slate-400">本周已用</div>
+                        <div className="mt-1 font-semibold text-slate-100">{currentMonitoring.weekly_used_text}</div>
+                      </div>
+                      <div className="rounded-md border border-cyan-300/15 bg-slate-950/55 p-2">
+                        <div className="text-slate-400">本周剩余</div>
+                        <div className="mt-1 font-semibold text-emerald-200">{currentMonitoring.weekly_remaining_text}</div>
+                      </div>
+                      <div className="rounded-md border border-cyan-300/15 bg-slate-950/55 p-2">
+                        <div className="text-slate-400">异常状态</div>
+                        <div className="mt-1 font-semibold text-amber-200">{currentMonitoring.is_fault ? "是" : "否"}</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 text-[11px] text-slate-400">
+                      周期：{new Date(currentMonitoring.cycle_start_time).toLocaleString("zh-CN")} ~ {new Date(currentMonitoring.cycle_end_time).toLocaleString("zh-CN")}
+                    </div>
+                    {currentMonitoring.status_tags.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {currentMonitoring.status_tags.map((tag) => (
+                          <span key={tag} className="px-2 py-1 rounded border border-amber-300/20 bg-amber-500/10 text-[11px] text-amber-100">
+                            {getTagLabel(tag)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="mt-3 text-[11px] text-slate-400 break-words">
+                      {currentMonitoring.status_text}
+                    </div>
+                  </div>
+                )}
                 
                 {/* ✅ 新增：AI 智脑控制中心 (下拉菜单版) */}
                 <div className="bg-slate-900/75 rounded-lg border border-blue-300/25 p-4 shadow-lg shrink-0">
@@ -1905,6 +2151,33 @@ export default function VideoCenter() {
                     onError={handlePtzError}
                   />
                 </div>
+
+                {/* ✅ 新增：流量显示面板（自动巡航下方）*/}
+                {currentMonitoring && (
+                  <div className="bg-slate-900/75 rounded-lg border border-blue-300/25 p-4 shadow-lg shrink-0">
+                    <div className="flex items-center gap-2 mb-3">
+                      <h3 className="font-bold text-slate-100 text-sm">📊 流量统计</h3>
+                      <span className="text-[10px] text-slate-400 font-mono">(每小时刷新)</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs text-slate-200">
+                      <div className="rounded-md border border-cyan-300/15 bg-slate-950/55 p-2">
+                        <div className="text-slate-400">周额度</div>
+                        <div className="mt-1 font-semibold text-cyan-200">{currentMonitoring.weekly_quota_text}</div>
+                      </div>
+                      <div className="rounded-md border border-cyan-300/15 bg-slate-950/55 p-2">
+                        <div className="text-slate-400">本周已用</div>
+                        <div className="mt-1 font-semibold text-slate-100">{currentMonitoring.weekly_used_text}</div>
+                      </div>
+                      <div className="rounded-md border border-cyan-300/15 bg-slate-950/55 p-2 col-span-2">
+                        <div className="text-slate-400">本周剩余</div>
+                        <div className="mt-1 font-semibold text-emerald-300 text-sm">{currentMonitoring.weekly_remaining_text}</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 text-[10px] text-slate-500 break-words">
+                      上次更新：{new Date(currentMonitoring.last_calculated_at).toLocaleString("zh-CN")}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

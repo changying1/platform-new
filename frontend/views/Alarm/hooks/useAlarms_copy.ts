@@ -2,25 +2,6 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { alarmApi, AlarmResponse } from '@/src/api/alarmApi';
 import { AlarmRecord, AlarmStatusFilter, AlarmLevelFilter } from '../types';
 
-const ALARM_TYPE_LABELS: Record<string, string> = {
-  VIDEO_DEVICE_OFFLINE: '视频设备离线',
-  VIDEO_DEVICE_SLEEPING: '视频设备待机/休眠',
-  VIDEO_DEVICE_PRIVACY_ENABLED: '视频设备隐私开启',
-  VIDEO_DEVICE_STORAGE_ABNORMAL: '视频设备存储异常',
-  VIDEO_DEVICE_LOW_BATTERY: '视频设备低电量',
-  VIDEO_DEVICE_WEAK_SIGNAL: '视频设备信号弱',
-  VIDEO_TRAFFIC_LOW: '视频设备流量低于阈值',
-  FENCE_ENTRY: '电子围栏闯入',
-  FENCE_EXIT: '电子围栏越界',
-};
-
-const toAlarmTypeLabel = (alarmType: string) => {
-  const normalized = String(alarmType || '').trim();
-  if (!normalized) return '未知报警';
-  if (ALARM_TYPE_LABELS[normalized]) return ALARM_TYPE_LABELS[normalized];
-  return normalized;
-};
-
 export const useAlarms = () => {
   const [alarms, setAlarms] = useState<AlarmRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -38,7 +19,7 @@ export const useAlarms = () => {
     rawId: a.id,
     user: a.device_id,
     device: a.device_id,
-    type: toAlarmTypeLabel(a.alarm_type),
+    type: a.alarm_type,
     time: new Date(a.timestamp).toLocaleString(),
     timestamp: a.timestamp,
     location: a.location || '未知位置',

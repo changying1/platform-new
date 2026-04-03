@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
-from datetime import datetime
+from typing import Optional
 from enum import Enum
 
 class VideoStatus(str, Enum):
@@ -34,12 +33,6 @@ class VideoBase(BaseModel):
     supports_cruise: Optional[int] = Field(1, description="是否支持巡航")
     supports_zoom: Optional[int] = Field(1, description="是否支持变焦")
     supports_focus: Optional[int] = Field(0, description="是否支持焦距")
-    weekly_quota_bytes: Optional[int] = Field(2147483648, description="每周固定流量额度（字节）")
-    sleeping: Optional[bool] = Field(False, description="是否待机/休眠")
-    privacy_enabled: Optional[bool] = Field(False, description="是否开启隐私模式")
-    storage_abnormal: Optional[bool] = Field(False, description="是否存在存储异常")
-    low_battery: Optional[bool] = Field(False, description="是否低电量")
-    weak_signal: Optional[bool] = Field(False, description="是否信号弱")
     
     latitude: Optional[float] = Field(None, description="纬度 (GCJ-02)")
     longitude: Optional[float] = Field(None, description="经度 (GCJ-02)")
@@ -74,12 +67,6 @@ class VideoUpdate(BaseModel):
     supports_cruise: Optional[int] = None
     supports_zoom: Optional[int] = None
     supports_focus: Optional[int] = None
-    weekly_quota_bytes: Optional[int] = None
-    sleeping: Optional[bool] = None
-    privacy_enabled: Optional[bool] = None
-    storage_abnormal: Optional[bool] = None
-    low_battery: Optional[bool] = None
-    weak_signal: Optional[bool] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     status: Optional[VideoStatus] = None
@@ -108,12 +95,6 @@ class VideoOut(VideoBase):
     supports_cruise: Optional[int] = 1
     supports_zoom: Optional[int] = 1
     supports_focus: Optional[int] = 0
-    weekly_quota_bytes: Optional[int] = 2147483648
-    sleeping: Optional[bool] = False
-    privacy_enabled: Optional[bool] = False
-    storage_abnormal: Optional[bool] = False
-    low_battery: Optional[bool] = False
-    weak_signal: Optional[bool] = False
     
     # --- 修改部分开始 ---
     # 原代码: status: VideoStatus
@@ -148,12 +129,6 @@ class CameraCreateRequest(BaseModel):
     ptz_source: Optional[str] = Field(None, description="PTZ 控制来源: onvif/ezviz")
     device_serial: Optional[str] = Field(None, description="萤石设备序列号")
     channel_no: Optional[int] = Field(1, description="萤石通道号")
-    weekly_quota_bytes: Optional[int] = Field(2147483648, description="每周固定流量额度（字节）")
-    sleeping: Optional[bool] = Field(False, description="是否待机/休眠")
-    privacy_enabled: Optional[bool] = Field(False, description="是否开启隐私模式")
-    storage_abnormal: Optional[bool] = Field(False, description="是否存在存储异常")
-    low_battery: Optional[bool] = Field(False, description="是否低电量")
-    weak_signal: Optional[bool] = Field(False, description="是否信号弱")
 
 
 class StreamUrlResponse(BaseModel):
@@ -163,31 +138,6 @@ class StreamUrlResponse(BaseModel):
     device_serial: Optional[str] = None
     channel_no: Optional[int] = None
     access_token: Optional[str] = None
-
-
-class VideoMonitoringSummary(BaseModel):
-    device_id: int
-    device_name: str
-    device_serial: Optional[str] = None
-    weekly_quota_bytes: int
-    weekly_used_bytes: int
-    weekly_remaining_bytes: int
-    weekly_quota_text: str
-    weekly_used_text: str
-    weekly_remaining_text: str
-    cycle_start_time: datetime
-    cycle_end_time: datetime
-    last_calculated_at: datetime
-    main_status: str
-    privacy_enabled: bool
-    storage_abnormal: bool
-    low_battery: bool
-    weak_signal: bool
-    sleeping: bool
-    alarm_active: bool
-    status_tags: List[str]
-    is_fault: bool
-    status_text: str
 
 class PTZDirection(str, Enum):
     UP = "up"

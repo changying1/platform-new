@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from urllib.parse import urlparse
 from app.models.video import VideoDevice
 from app.models.device import Device
+from app.models.alarm_records import AlarmRecord
 from app.schemas.video_schema import VideoCreate, VideoUpdate, CameraCreateRequest
 from app.utils.logger import get_logger
 import requests
@@ -69,6 +70,9 @@ EZVIZ_BASE_URL = os.getenv("EZVIZ_BASE_URL", "https://open.ys7.com").rstrip("/")
 EZVIZ_APP_KEY = os.getenv("EZVIZ_APP_KEY", "")
 EZVIZ_APP_SECRET = os.getenv("EZVIZ_APP_SECRET", "")
 DEFAULT_STREAM_PROTOCOL = os.getenv("VIDEO_DEFAULT_STREAM_PROTOCOL", "ezopen")
+DEFAULT_WEEKLY_QUOTA_GB = float(os.getenv("VIDEO_DEFAULT_WEEKLY_QUOTA_GB", "2"))
+DEFAULT_WEEKLY_QUOTA_BYTES = int(DEFAULT_WEEKLY_QUOTA_GB * 1024 * 1024 * 1024)
+TRAFFIC_ALERT_THRESHOLD_RATIO = float(os.getenv("VIDEO_TRAFFIC_ALERT_THRESHOLD_RATIO", "0.2"))
 
 STREAM_PROTOCOL_MAP = {
     "ezopen": 1,
@@ -96,6 +100,407 @@ PERIODIC_ARCHIVE_LAST_RUN_AT: Dict[int, float] = {}
 EZVIZ_PRESET_UNSUPPORTED_DEVICES: Set[int] = set()
 
 class VideoService:
+    def _normalize_flag(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def _format_bytes(self, value: int) -> str:
+        size = max(0, int(value or 0))
+        units = ["B", "KB", "MB", "GB", "TB"]
+        display = float(size)
+        unit_index = 0
+        while display >= 1024 and unit_index < len(units) - 1:
+            display /= 1024
+            unit_index += 1
+        if unit_index == 0:
+            return f"{int(display)}{units[unit_index]}"
+        return f"{display:.2f}{units[unit_index]}"
+
+    def _get_week_cycle_bounds(self, reference: Optional[datetime] = None) -> tuple[datetime, datetime]:
+        now = reference or datetime.now()
+        week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        return week_start, now
+
+    def _get_weekly_quota_bytes(self, db_video: VideoDevice) -> int:
+        quota = getattr(db_video, "weekly_quota_bytes", None)
+        if isinstance(quota, int) and quota > 0:
+            return quota
+        if isinstance(quota, float) and quota > 0:
+            return int(quota)
+        return DEFAULT_WEEKLY_QUOTA_BYTES
+
+    def _get_ezviz_device_traffic_bytes(self, db_video: VideoDevice, cycle_start: datetime, cycle_end: datetime) -> Optional[int]:
+        """
+        从萤石云查询设备在指定时间范围内的实际流量消耗（单位：字节）。
+        查询失败时返回 None，外层可降级到本地分段统计。
+        """
+        device_serial = str(getattr(db_video, "device_serial", "") or "").strip()
+        if not device_serial:
+            return None
+
+        channel_no = int(getattr(db_video, "channel_no", None) or 1)
+        start_str = cycle_start.strftime("%Y-%m-%d %H:%M:%S")
+        end_str = cycle_end.strftime("%Y-%m-%d %H:%M:%S")
+
+        # 尝试多种可能的萤石云流量查询端点和参数格式
+        paths_and_payloads = [
+            # 方案 1: 设备流量查询 - 完整参数
+            (
+                "/api/lapp/device/traffic",
+                {
+                    "deviceSerial": device_serial,
+                    "channelNo": channel_no,
+                    "startTime": start_str,
+                    "endTime": end_str,
+                }
+            ),
+            # 方案 2: 设备流量查询 v2
+            (
+                "/api/lapp/v2/device/traffic",
+                {
+                    "deviceSerial": device_serial,
+                    "channelNo": channel_no,
+                    "startTime": start_str,
+                    "endTime": end_str,
+                }
+            ),
+            # 方案 3: 设备流量统计 - 时间戳格式
+            (
+                "/api/lapp/device/traffic/get",
+                {
+                    "deviceSerial": device_serial,
+                    "channelNo": channel_no,
+                    "beginTime": int(cycle_start.timestamp() * 1000),
+                    "endTime": int(cycle_end.timestamp() * 1000),
+                }
+            ),
+            # 方案 4: 设备用量查询
+            (
+                "/api/lapp/device/usage",
+                {
+                    "deviceSerial": device_serial,
+                    "channelNo": channel_no,
+                    "startTime": start_str,
+                    "endTime": end_str,
+                }
+            ),
+        ]
+
+        for path, payload in paths_and_payloads:
+            try:
+                body = self._call_ezviz_api(path, payload, retry_on_token_error=True)
+                data = body.get("data") or {}
+
+                # 尝试各种可能的字段名
+                traffic_bytes = (
+                    data.get("traffic")
+                    or data.get("flowUsed")
+                    or data.get("used")
+                    or data.get("consumed")
+                    or data.get("bytes")
+                    or data.get("trafficBytes")
+                )
+
+                if traffic_bytes is not None:
+                    traffic_int = int(traffic_bytes)
+                    logger.info(
+                        f"EZVIZ traffic query success: device_serial={device_serial}, "
+                        f"channel={channel_no}, bytes={traffic_int}, period={cycle_start}~{cycle_end}"
+                    )
+                    return max(0, traffic_int)
+            except Exception as e:
+                logger.debug(
+                    f"EZVIZ traffic query failed on {path} for {device_serial}#{channel_no}: {e}"
+                )
+                continue
+
+        # 所有端点都失败或返回 None
+        logger.warning(
+            f"EZVIZ traffic query exhausted all endpoints for {device_serial}#{channel_no}, "
+            f"will fallback to local recording segments"
+        )
+        return None
+
+    def _collect_weekly_recording_usage_bytes(self, video_id: int, cycle_start: datetime, cycle_end: datetime) -> int:
+        """统计本地录像分段字节数，作为流量消耗的降级方案。"""
+        device_root = os.path.join(self._get_record_root(), str(video_id))
+        if not os.path.isdir(device_root):
+            return 0
+
+        total = 0
+        for file_path in glob.glob(os.path.join(device_root, "*.mp4")):
+            try:
+                seg_start = self._parse_segment_start(file_path)
+                if seg_start is None:
+                    seg_start = datetime.fromtimestamp(os.path.getmtime(file_path))
+                if seg_start < cycle_start or seg_start >= cycle_end:
+                    continue
+                total += int(os.path.getsize(file_path))
+            except Exception:
+                continue
+        return total
+
+    def _build_device_status_summary(self, db: Session, db_video: VideoDevice) -> dict:
+        raw_status = str(getattr(db_video, "status", "offline") or "offline").strip().lower()
+        sleeping = self._normalize_flag(getattr(db_video, "sleeping", False))
+        if sleeping:
+            main_status = "sleeping"
+        elif raw_status not in {"online", "offline", "sleeping"}:
+            main_status = "offline"
+        else:
+            main_status = raw_status
+
+        privacy_enabled = self._normalize_flag(getattr(db_video, "privacy_enabled", False))
+        storage_abnormal = self._normalize_flag(getattr(db_video, "storage_abnormal", False))
+        low_battery = self._normalize_flag(getattr(db_video, "low_battery", False))
+        weak_signal = self._normalize_flag(getattr(db_video, "weak_signal", False))
+
+        alarm_active = bool(
+            db.query(AlarmRecord)
+            .filter(
+                AlarmRecord.device_id == str(db_video.id),
+                AlarmRecord.status == "pending",
+            )
+            .first()
+        )
+
+        status_tags: list[str] = []
+        if privacy_enabled:
+            status_tags.append("privacy_enabled")
+        if storage_abnormal:
+            status_tags.append("storage_abnormal")
+        if low_battery:
+            status_tags.append("low_battery")
+        if weak_signal:
+            status_tags.append("weak_signal")
+        if alarm_active:
+            status_tags.append("alarm_active")
+
+        is_fault = bool(storage_abnormal or low_battery or weak_signal or alarm_active or main_status == "offline")
+        status_text_map = {
+            "online": "在线",
+            "offline": "离线",
+            "sleeping": "待机/休眠",
+        }
+        status_text_parts = [status_text_map.get(main_status, "离线")]
+        tag_text_map = {
+            "privacy_enabled": "隐私开启",
+            "storage_abnormal": "存储异常",
+            "low_battery": "低电量",
+            "weak_signal": "信号弱",
+            "alarm_active": "异常告警中",
+        }
+        status_text_parts.extend(tag_text_map[tag] for tag in status_tags if tag in tag_text_map)
+
+        return {
+            "main_status": main_status,
+            "privacy_enabled": privacy_enabled,
+            "storage_abnormal": storage_abnormal,
+            "low_battery": low_battery,
+            "weak_signal": weak_signal,
+            "sleeping": sleeping,
+            "alarm_active": alarm_active,
+            "status_tags": status_tags,
+            "is_fault": is_fault,
+            "status_text": "｜".join(status_text_parts),
+        }
+
+    def _sync_single_monitoring_alarm(
+        self,
+        db: Session,
+        db_video: VideoDevice,
+        alarm_type: str,
+        severity: str,
+        description: str,
+        active: bool,
+    ) -> bool:
+        """将监控状态同步为报警记录：active=True 生成待处理报警，False 自动恢复。"""
+        device_id = str(db_video.id)
+        pending_alarm = (
+            db.query(AlarmRecord)
+            .filter(
+                AlarmRecord.device_id == device_id,
+                AlarmRecord.alarm_type == alarm_type,
+                AlarmRecord.status == "pending",
+            )
+            .first()
+        )
+
+        if active:
+            if pending_alarm:
+                return False
+            db.add(
+                AlarmRecord(
+                    device_id=device_id,
+                    alarm_type=alarm_type,
+                    severity=severity,
+                    description=description,
+                    location=db_video.name or f"视频设备-{device_id}",
+                    status="pending",
+                )
+            )
+            return True
+
+        if pending_alarm:
+            pending_alarm.status = "resolved"
+            pending_alarm.handled_at = datetime.utcnow() + timedelta(hours=8)
+            return True
+
+        return False
+
+    def _sync_monitoring_alarms(
+        self,
+        db: Session,
+        db_video: VideoDevice,
+        status_summary: dict,
+        weekly_quota_bytes: int,
+        weekly_used_bytes: int,
+        weekly_remaining_bytes: int,
+    ) -> bool:
+        """根据设备状态与流量阈值同步报警记录。"""
+        changed = False
+
+        alarm_specs = [
+            (
+                "VIDEO_DEVICE_OFFLINE",
+                "high",
+                f"视频设备 {db_video.name} 离线",
+                status_summary.get("main_status") == "offline",
+            ),
+            (
+                "VIDEO_DEVICE_SLEEPING",
+                "low",
+                f"视频设备 {db_video.name} 处于待机/休眠",
+                bool(status_summary.get("sleeping")),
+            ),
+            (
+                "VIDEO_DEVICE_PRIVACY_ENABLED",
+                "low",
+                f"视频设备 {db_video.name} 开启隐私模式",
+                bool(status_summary.get("privacy_enabled")),
+            ),
+            (
+                "VIDEO_DEVICE_STORAGE_ABNORMAL",
+                "high",
+                f"视频设备 {db_video.name} 存储异常",
+                bool(status_summary.get("storage_abnormal")),
+            ),
+            (
+                "VIDEO_DEVICE_LOW_BATTERY",
+                "medium",
+                f"视频设备 {db_video.name} 低电量",
+                bool(status_summary.get("low_battery")),
+            ),
+            (
+                "VIDEO_DEVICE_WEAK_SIGNAL",
+                "medium",
+                f"视频设备 {db_video.name} 信号弱",
+                bool(status_summary.get("weak_signal")),
+            ),
+        ]
+
+        for alarm_type, severity, description, active in alarm_specs:
+            changed = self._sync_single_monitoring_alarm(
+                db=db,
+                db_video=db_video,
+                alarm_type=alarm_type,
+                severity=severity,
+                description=description,
+                active=active,
+            ) or changed
+
+        quota = max(0, int(weekly_quota_bytes or 0))
+        remaining = max(0, int(weekly_remaining_bytes or 0))
+        ratio = (remaining / quota) if quota > 0 else 0.0
+        traffic_low_active = quota > 0 and ratio <= TRAFFIC_ALERT_THRESHOLD_RATIO
+        traffic_desc = (
+            f"视频设备 {db_video.name} 流量低于阈值20%，"
+            f"剩余 {self._format_bytes(remaining)} / 周额度 {self._format_bytes(quota)}，"
+            f"本周已用 {self._format_bytes(weekly_used_bytes)}"
+        )
+        changed = self._sync_single_monitoring_alarm(
+            db=db,
+            db_video=db_video,
+            alarm_type="VIDEO_TRAFFIC_LOW",
+            severity="medium",
+            description=traffic_desc,
+            active=traffic_low_active,
+        ) or changed
+
+        return changed
+
+    def get_monitoring_summary(self, db: Session, video_id: Optional[int] = None):
+        query = db.query(VideoDevice)
+        if video_id is not None:
+            query = query.filter(VideoDevice.id == video_id)
+
+        now = datetime.now()
+        cycle_start, cycle_end = self._get_week_cycle_bounds(now)
+        videos = query.all()
+        summaries = []
+        has_alarm_changes = False
+
+        for db_video in videos:
+            weekly_quota_bytes = self._get_weekly_quota_bytes(db_video)
+            
+            # ✅ 优先查询萤石云真实流量消耗，失败则降级到本地分段统计
+            is_ezviz_cloud = self._is_ezviz_access(db_video)
+            if is_ezviz_cloud:
+                ezviz_traffic = self._get_ezviz_device_traffic_bytes(db_video, cycle_start, cycle_end)
+                if ezviz_traffic is not None:
+                    weekly_used_bytes = ezviz_traffic
+                else:
+                    # 萤石云查询失败，降级到本地分段统计
+                    weekly_used_bytes = self._collect_weekly_recording_usage_bytes(db_video.id, cycle_start, cycle_end)
+            else:
+                # 本地 ONVIF 设备，使用本地分段统计
+                weekly_used_bytes = self._collect_weekly_recording_usage_bytes(db_video.id, cycle_start, cycle_end)
+            
+            weekly_remaining_bytes = max(0, weekly_quota_bytes - weekly_used_bytes)
+
+            status_summary = self._build_device_status_summary(db, db_video)
+            has_alarm_changes = self._sync_monitoring_alarms(
+                db=db,
+                db_video=db_video,
+                status_summary=status_summary,
+                weekly_quota_bytes=weekly_quota_bytes,
+                weekly_used_bytes=weekly_used_bytes,
+                weekly_remaining_bytes=weekly_remaining_bytes,
+            ) or has_alarm_changes
+            status_summary = self._build_device_status_summary(db, db_video)
+
+            summaries.append({
+                "device_id": db_video.id,
+                "device_name": db_video.name,
+                "device_serial": getattr(db_video, "device_serial", None),
+                "weekly_quota_bytes": weekly_quota_bytes,
+                "weekly_used_bytes": weekly_used_bytes,
+                "weekly_remaining_bytes": weekly_remaining_bytes,
+                "weekly_quota_text": self._format_bytes(weekly_quota_bytes),
+                "weekly_used_text": self._format_bytes(weekly_used_bytes),
+                "weekly_remaining_text": self._format_bytes(weekly_remaining_bytes),
+                "cycle_start_time": cycle_start,
+                "cycle_end_time": cycle_end,
+                "last_calculated_at": now,
+                **status_summary,
+            })
+
+        if has_alarm_changes:
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to persist monitoring alarms: {e}")
+
+        if video_id is not None:
+            return summaries[0] if summaries else None
+        return summaries
+
     def _get_ezviz_config(self) -> tuple[str, str, str]:
         # 运行时读取环境变量，避免导入时机导致配置值为空。
         base_url = (os.getenv("EZVIZ_BASE_URL") or EZVIZ_BASE_URL or "https://open.ys7.com").rstrip("/")
@@ -1111,6 +1516,12 @@ class VideoService:
             supports_cruise=1,
             supports_zoom=1,
             supports_focus=0,
+            weekly_quota_bytes=int(getattr(camera_data, "weekly_quota_bytes", None) or DEFAULT_WEEKLY_QUOTA_BYTES),
+            sleeping=self._normalize_flag(getattr(camera_data, "sleeping", False)),
+            privacy_enabled=self._normalize_flag(getattr(camera_data, "privacy_enabled", False)),
+            storage_abnormal=self._normalize_flag(getattr(camera_data, "storage_abnormal", False)),
+            low_battery=self._normalize_flag(getattr(camera_data, "low_battery", False)),
+            weak_signal=self._normalize_flag(getattr(camera_data, "weak_signal", False)),
             latitude=camera_data.latitude,
             longitude=camera_data.longitude,
             status="online",

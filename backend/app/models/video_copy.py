@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Text, Boolean, BigInteger
+from sqlalchemy import Column, Integer, String, Float, Text
 from app.core.database import Base
 
 class VideoDevice(Base):
@@ -43,12 +43,6 @@ class VideoDevice(Base):
     
     # 状态与备注
     status = Column(String(20), default="offline", comment="设备状态: online, offline")
-    weekly_quota_bytes = Column(BigInteger, default=2147483648, comment="每周固定流量额度（字节）")
-    sleeping = Column(Boolean, default=False, comment="是否待机/休眠")
-    privacy_enabled = Column(Boolean, default=False, comment="是否开启隐私模式")
-    storage_abnormal = Column(Boolean, default=False, comment="是否存在存储异常")
-    low_battery = Column(Boolean, default=False, comment="是否低电量")
-    weak_signal = Column(Boolean, default=False, comment="是否信号弱")
     remark = Column(String(255), comment="备注信息")
     
     # 启用状态

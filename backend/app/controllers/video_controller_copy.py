@@ -17,7 +17,6 @@ from app.schemas.video_schema import (
     PresetBulkDeleteRequest,
     PresetBulkDeleteResponse,
     StreamUrlResponse,
-    VideoMonitoringSummary,
 )
 from app.models.video import VideoDevice
 from app.services.video_service import VideoService
@@ -186,20 +185,6 @@ def sync_devices(db: Session = Depends(get_db)):
 def get_ezviz_health():
     """萤石云配置与 token 健康检查"""
     return service.get_ezviz_health()
-
-@router.get("/monitoring", response_model=List[VideoMonitoringSummary])
-def get_video_monitoring_summaries(db: Session = Depends(get_db)):
-    """获取全部视频设备的周流量与状态监测摘要"""
-    return service.get_monitoring_summary(db)
-
-
-@router.get("/monitoring/{video_id}", response_model=VideoMonitoringSummary)
-def get_video_monitoring_summary(video_id: int, db: Session = Depends(get_db)):
-    """获取单个视频设备的周流量与状态监测摘要"""
-    summary = service.get_monitoring_summary(db, video_id)
-    if not summary:
-        raise HTTPException(status_code=404, detail="Monitoring summary not found")
-    return summary
 
 @router.get("/stream/{video_id}", response_model=StreamUrlResponse)
 def get_video_stream(video_id: int, db: Session = Depends(get_db)):
