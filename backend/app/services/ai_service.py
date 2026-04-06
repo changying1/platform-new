@@ -10,9 +10,15 @@ import asyncio
 
 
 class AIService:
-    def __init__(self, model_path="app/models/best.pt", cooldown_seconds=5, shared_cooldown_map=None):
+    def __init__(self, model_path="app/models/best.pt",
+                 model_b_path="app/models/yolo26_helmet.pt",
+                 cooldown_seconds=5, shared_cooldown_map=None):
         self.model_path = model_path
         self.model = None
+
+        # YOLO26 安全帽检测模型
+        self.model_b_path = model_b_path   # Helmet模型: head, helmet
+        self.model_b = None
 
         self.cooldown_seconds = cooldown_seconds
         # 如果传入共享映射则用共享的，否则用实例私有的（兼容旧调用）
@@ -82,6 +88,85 @@ class AIService:
             print(f"❌ [严重错误] 模型加载失败: {e}")
             return False
 
+
+
+    # ===== 单模型安全帽检测（分类别置信度） =====
+
+    def _load_helmet_model_safe(self):
+        """只加载安全帽检测模型(B)"""
+        if self.model_b is not None:
+            return True
+        try:
+            base_dir = os.getcwd()
+            path_b = os.path.join(base_dir, self.model_b_path)
+            if not os.path.exists(path_b):
+                print(f"❌ [错误] 找不到Helmet模型: {path_b}")
+                return False
+            print("⏳ [AI服务] 正在加载Helmet模型(B) (CPU模式)...")
+            self.model_b = YOLO(path_b)
+            self.model_b.to("cpu")
+            print("✅ [AI服务] Helmet模型(B)加载完成")
+            return True
+        except Exception as e:
+            print(f"❌ [严重错误] Helmet模型加载失败: {e}")
+            return False
+
+    def _helmet_detect(self, frame, conf_head=0.1, conf_helmet=0.6):
+        """
+        单模型安全帽检测，支持 head/helmet 分类别置信度过滤。
+        返回: dict {"all_boxes": [...], "head_count": int, "helmet_count": int} 或 None
+        """
+        if not self._load_helmet_model_safe():
+            return None
+
+        base_conf = min(conf_head, conf_helmet)
+        results = self.model_b(frame, conf=base_conf, verbose=False)[0]
+
+        all_boxes = []
+        head_count = 0
+        helmet_count = 0
+        skipped = []
+
+        for box in results.boxes:
+            cls_name = results.names[int(box.cls[0])]
+            conf_val = float(box.conf[0])
+            coords = box.xyxy[0].tolist()
+
+            # 分类别置信度过滤
+            if cls_name == 'head' and conf_val < conf_head:
+                skipped.append(f"{cls_name}({conf_val:.3f}<{conf_head})")
+                continue
+            if cls_name == 'helmet' and conf_val < conf_helmet:
+                skipped.append(f"{cls_name}({conf_val:.3f}<{conf_helmet})")
+                continue
+
+            all_boxes.append({
+                "label": cls_name,
+                "conf": conf_val,
+                "coords": coords,
+            })
+
+            if cls_name == 'head':
+                head_count += 1
+            elif cls_name == 'helmet':
+                helmet_count += 1
+
+        # 控制台输出检测结果
+        if all_boxes or skipped:
+            print(f"🔍 [安全帽检测] 有效目标: {len(all_boxes)} | head={head_count} helmet={helmet_count} | 过滤掉: {len(skipped)}")
+            for b in all_boxes:
+                icon = "🚨" if b["label"] == "head" else "✅"
+                print(f"   {icon} {b['label']:>6s}  conf={b['conf']:.3f}  box={[int(x) for x in b['coords']]}")
+            for s in skipped:
+                print(f"   ⏭️ 过滤: {s}")
+
+        return {
+            "all_boxes": all_boxes,
+            "head_count": head_count,
+            "helmet_count": helmet_count,
+        }
+
+
     def _check_cooldown_and_alarm(self, alarm_type, msg, score, coords):
 
         now = time.time()
@@ -129,6 +214,21 @@ class AIService:
             # 在 AI 线程中安全触发异步推送，避免 no running event loop
             self._push_alarm_safe(data)
 
+            return True, data
+
+        return False, None
+
+    def _check_cooldown_and_multi_alarm(self, alarm_type, boxes):
+        """多目标版本：一次推送多个标框，共享冷却控制"""
+        now = time.time()
+        cooldown_key = alarm_type
+        last = self.last_alarm_time_map.get(cooldown_key, 0.0)
+
+        if now - last > self.cooldown_seconds:
+            self.last_alarm_time_map[cooldown_key] = now
+            data = {"alarm": True, "boxes": boxes}
+            self._push_alarm_safe(data)
+            print(f"🚨 [AI监测] 报警已发出! ({alarm_type}) [{len(boxes)}个目标]")
             return True, data
 
         return False, None

@@ -23,6 +23,12 @@ export interface Video {
   supports_cruise?: number;
   supports_zoom?: number;
   supports_focus?: number;
+  weekly_quota_bytes?: number;
+  sleeping?: boolean;
+  privacy_enabled?: boolean;
+  storage_abnormal?: boolean;
+  low_battery?: boolean;
+  weak_signal?: boolean;
   status: 'online' | 'offline';
   is_active: number;
   remark?: string;
@@ -45,6 +51,12 @@ export interface VideoCreate {
   ptz_source?: 'onvif' | 'ezviz' | string;
   device_serial?: string;
   channel_no?: number;
+  weekly_quota_bytes?: number;
+  sleeping?: boolean;
+  privacy_enabled?: boolean;
+  storage_abnormal?: boolean;
+  low_battery?: boolean;
+  weak_signal?: boolean;
   status?: 'online' | 'offline';
   remark?: string;
 }
@@ -69,6 +81,12 @@ export interface VideoUpdate {
   supports_cruise?: number;
   supports_zoom?: number;
   supports_focus?: number;
+  weekly_quota_bytes?: number;
+  sleeping?: boolean;
+  privacy_enabled?: boolean;
+  storage_abnormal?: boolean;
+  low_battery?: boolean;
+  weak_signal?: boolean;
   status?: 'online' | 'offline';
   remark?: string;
   is_active?: number;
@@ -147,6 +165,31 @@ export interface PresetBulkDeleteResponse {
   failed_tokens: string[];
 }
 
+export interface VideoMonitoringSummary {
+  device_id: number;
+  device_name: string;
+  device_serial?: string | null;
+  weekly_quota_bytes: number;
+  weekly_used_bytes: number;
+  weekly_remaining_bytes: number;
+  weekly_quota_text: string;
+  weekly_used_text: string;
+  weekly_remaining_text: string;
+  cycle_start_time: string;
+  cycle_end_time: string;
+  last_calculated_at: string;
+  main_status: 'online' | 'offline' | 'sleeping' | string;
+  privacy_enabled: boolean;
+  storage_abnormal: boolean;
+  low_battery: boolean;
+  weak_signal: boolean;
+  sleeping: boolean;
+  alarm_active: boolean;
+  status_tags: string[];
+  is_fault: boolean;
+  status_text: string;
+}
+
 // --- API 方法 ---
 
 /** 获取所有视频设备列表 */
@@ -215,6 +258,21 @@ export async function deleteVideo(videoId: number): Promise<{ status: string }> 
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || 'Failed to delete video');
+  }
+  return response.json();
+}
+
+export async function getVideoMonitoringSummaries(): Promise<VideoMonitoringSummary[]> {
+  const response = await fetch(`${API_BASE_URL}/video/monitoring`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to fetch video monitoring summaries');
+  return response.json();
+}
+
+export async function getVideoMonitoringSummary(videoId: number): Promise<VideoMonitoringSummary> {
+  const response = await fetch(`${API_BASE_URL}/video/monitoring/${videoId}`, { cache: 'no-store' });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to fetch video monitoring summary');
   }
   return response.json();
 }
@@ -338,6 +396,12 @@ export async function addCameraViaRTSP(cameraData: {
   ptz_source?: 'onvif' | 'ezviz' | string;
   device_serial?: string;
   channel_no?: number;
+  weekly_quota_bytes?: number;
+  sleeping?: boolean;
+  privacy_enabled?: boolean;
+  storage_abnormal?: boolean;
+  low_battery?: boolean;
+  weak_signal?: boolean;
 }): Promise<Video> {
   const response = await fetch(`${API_BASE_URL}/video/add_camera`, {
     method: 'POST',
@@ -694,7 +758,7 @@ export async function getAlarmPlaybackVideos(
 // --- 找到 frontend/src/api/videoApi.ts 文件，在末尾添加以下内容 ---
 
 // 1. 开启 AI 监控
-export const startAIMonitoring = async (deviceId: string, rtspUrl: string, algoType: string = "helmet") => {
+export const startAIMonitoring = async (deviceId: string, rtspUrl: string, algoType: string = "helmet,smoking") => {
   const response = await fetch(`${API_BASE_URL}/video/ai/start`, {
     method: 'POST',
     headers: {

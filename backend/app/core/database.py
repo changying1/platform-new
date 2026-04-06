@@ -45,6 +45,12 @@ def ensure_schema_compatibility():
             "supports_cruise": "ALTER TABLE video_devices ADD COLUMN supports_cruise INT NOT NULL DEFAULT 1",
             "supports_zoom": "ALTER TABLE video_devices ADD COLUMN supports_zoom INT NOT NULL DEFAULT 1",
             "supports_focus": "ALTER TABLE video_devices ADD COLUMN supports_focus INT NOT NULL DEFAULT 0",
+            "weekly_quota_bytes": "ALTER TABLE video_devices ADD COLUMN weekly_quota_bytes BIGINT NOT NULL DEFAULT 2147483648",
+            "sleeping": "ALTER TABLE video_devices ADD COLUMN sleeping TINYINT(1) NOT NULL DEFAULT 0",
+            "privacy_enabled": "ALTER TABLE video_devices ADD COLUMN privacy_enabled TINYINT(1) NOT NULL DEFAULT 0",
+            "storage_abnormal": "ALTER TABLE video_devices ADD COLUMN storage_abnormal TINYINT(1) NOT NULL DEFAULT 0",
+            "low_battery": "ALTER TABLE video_devices ADD COLUMN low_battery TINYINT(1) NOT NULL DEFAULT 0",
+            "weak_signal": "ALTER TABLE video_devices ADD COLUMN weak_signal TINYINT(1) NOT NULL DEFAULT 0",
         },
     }
 
