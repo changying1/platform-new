@@ -404,14 +404,65 @@ class AIManager:
             filename = f"{device_id}_{int(time.time())}_{uuid.uuid4().hex[:6]}.jpg"
             filepath = os.path.join(self.static_dir, filename)
 
-            cv2.imwrite(filepath, frame)
+            # 在帧上绘制报警标注框
+            annotated = self._draw_alarm_boxes(frame, details)
+            cv2.imwrite(filepath, annotated)
             return f"/static/alarms/{filename}"
 
         except Exception as e:
             print(f"❌ 图片保存失败: {e}")
             return ""
 
-    def _save_alarm_clip_async(self, alarm_id: int, device_id: str, alarm_time: datetime):
+    def _draw_alarm_boxes(self, frame, details):
+        """在帧上绘制报警框 + 标签（报警类型、置信度）"""
+        if not details or not isinstance(details, dict):
+            return frame
+
+        canvas = frame.copy()
+        boxes = details.get("boxes", [])
+        if not boxes:
+            return canvas
+
+        for box in boxes:
+            coords = box.get("coords")
+            if not coords or len(coords) < 4:
+                continue
+
+            x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+            alarm_type = box.get("type", "报警")
+            msg = box.get("msg", "")
+            score = box.get("score", 0)
+
+            # 颜色：head/未佩戴=红色，helmet/合规=绿色，其他=橙色
+            label_lower = alarm_type.lower()
+            if "未佩戴" in alarm_type or "head" in label_lower:
+                color = (0, 0, 255)       # 红色
+            elif "helmet" in label_lower or "合规" in alarm_type:
+                color = (0, 200, 0)       # 绿色
+            elif "抽烟" in alarm_type or "smoking" in label_lower:
+                color = (0, 140, 255)     # 橙色
+            else:
+                color = (0, 165, 255)     # 默认橙色
+
+            # 画矩形框
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+
+            # 标签文字
+            label = f"{alarm_type} {score:.0%}" if score else alarm_type
+            if msg and msg != alarm_type:
+                label = msg
+
+            # 文字背景
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            thickness = 1
+            (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+            cv2.rectangle(canvas, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(canvas, label, (x1 + 2, y1 - 4), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+        return canvas
+
+    def _save_alarm_clip_async(self, alarm_id: int, device_id: str, alarm_time: datetime, details: dict | None = None):
         def _worker():
             try:
                 video_id = int(device_id)
@@ -419,14 +470,14 @@ class AIManager:
                 self._update_alarm_recording_status(alarm_id, "failed", None, "device_id 非摄像头ID，无法自动录像")
                 return
 
-            # 等待到“报警后2分钟窗口”结束，且尾部分段达到可拼接成熟期，避免末段仍在写入导致失败。
-            mature_buffer = RECORD_SEGMENT_SECONDS + RECORD_SEGMENT_SAFE_MARGIN_SECONDS
-            wait_seconds = (alarm_time + timedelta(minutes=2, seconds=mature_buffer) - datetime.now()).total_seconds()
+            # 增加等待时间：报警后 1 分钟的录像 + 20 秒缓冲，确保分段写入磁盘
+            wait_seconds = (alarm_time + timedelta(seconds=80) - datetime.now()).total_seconds()
             if wait_seconds > 0:
-                time.sleep(min(wait_seconds, 300))
+                time.sleep(min(wait_seconds, 120))
 
-            clip_start = alarm_time - timedelta(minutes=2)
-            clip_end = alarm_time + timedelta(minutes=2)
+            # 保存前后 1 分钟，总计 2 分钟
+            clip_start = alarm_time - timedelta(minutes=1)
+            clip_end = alarm_time + timedelta(minutes=1)
 
             last_error = None
             for attempt in range(1, 3):
@@ -437,6 +488,8 @@ class AIManager:
                         clip_end,
                         output_type="alarm",
                         filename_prefix=f"alarm_{alarm_id}",
+                        alarm_time=alarm_time,
+                        details=details,
                     )
                     self._update_alarm_recording_status(
                         alarm_id,
@@ -514,7 +567,7 @@ class AIManager:
             db.commit()
             db.refresh(record)
 
-            self._save_alarm_clip_async(record.id, str(device_id), record.timestamp or datetime.now())
+            self._save_alarm_clip_async(record.id, str(device_id), record.timestamp or datetime.now(), details=details)
 
             print(f"✅ 报警已保存 (ID: {record.id})")
             return record.id

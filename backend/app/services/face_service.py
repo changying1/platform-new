@@ -9,7 +9,7 @@ import numpy as np
 
 class FaceService:
     def __init__(self, pose_model_path="app/models/yolo11n-pose.pt",
-                 face_db_dir="app/data/face_db", similarity_threshold=0.70):
+                 face_db_dir="app/data/face_db", similarity_threshold=0.60):
         self.pose_model_path = pose_model_path
         self.face_db_dir = face_db_dir
         self.similarity_threshold = similarity_threshold

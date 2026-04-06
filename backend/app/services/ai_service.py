@@ -11,20 +11,14 @@ import asyncio
 
 class AIService:
     def __init__(self, model_path="app/models/best.pt",
-                 model_a_path="app/models/yolo26_person.pt",
                  model_b_path="app/models/yolo26_helmet.pt",
                  cooldown_seconds=5, shared_cooldown_map=None):
         self.model_path = model_path
         self.model = None
 
-        # YOLO26 双模型（安全帽 + 抽烟检测）
-        self.model_a_path = model_a_path   # Person模型: Smoking, helmet, person
-        self.model_b_path = model_b_path   # Helmet模型: Smoking, head, helmet
-        self.model_a = None
+        # YOLO26 安全帽检测模型
+        self.model_b_path = model_b_path   # Helmet模型: head, helmet
         self.model_b = None
-        # 帧级缓存，同一帧多个算法调用时避免重复推理
-        self._last_frame_id = None
-        self._last_dual_results = None
 
         self.cooldown_seconds = cooldown_seconds
         # 如果传入共享映射则用共享的，否则用实例私有的（兼容旧调用）
@@ -94,78 +88,84 @@ class AIService:
             print(f"❌ [严重错误] 模型加载失败: {e}")
             return False
 
-    # ===== YOLO26 双模型加载与推理 =====
 
-    def _load_dual_models_safe(self):
-        """加载 YOLO26 双模型（Person + Helmet）"""
-        if self.model_a is not None and self.model_b is not None:
+
+    # ===== 单模型安全帽检测（分类别置信度） =====
+
+    def _load_helmet_model_safe(self):
+        """只加载安全帽检测模型(B)"""
+        if self.model_b is not None:
             return True
         try:
             base_dir = os.getcwd()
-            if self.model_a is None:
-                path_a = os.path.join(base_dir, self.model_a_path)
-                if not os.path.exists(path_a):
-                    print(f"❌ [错误] 找不到Person模型: {path_a}")
-                    return False
-                print("⏳ [AI服务] 正在加载Person模型(A) (CPU模式)...")
-                self.model_a = YOLO(path_a)
-                self.model_a.to("cpu")
-                print("✅ [AI服务] Person模型(A)加载完成")
-
-            if self.model_b is None:
-                path_b = os.path.join(base_dir, self.model_b_path)
-                if not os.path.exists(path_b):
-                    print(f"❌ [错误] 找不到Helmet模型: {path_b}")
-                    return False
-                print("⏳ [AI服务] 正在加载Helmet模型(B) (CPU模式)...")
-                self.model_b = YOLO(path_b)
-                self.model_b.to("cpu")
-                print("✅ [AI服务] Helmet模型(B)加载完成")
-
+            path_b = os.path.join(base_dir, self.model_b_path)
+            if not os.path.exists(path_b):
+                print(f"❌ [错误] 找不到Helmet模型: {path_b}")
+                return False
+            print("⏳ [AI服务] 正在加载Helmet模型(B) (CPU模式)...")
+            self.model_b = YOLO(path_b)
+            self.model_b.to("cpu")
+            print("✅ [AI服务] Helmet模型(B)加载完成")
             return True
         except Exception as e:
-            print(f"❌ [严重错误] 双模型加载失败: {e}")
+            print(f"❌ [严重错误] Helmet模型加载失败: {e}")
             return False
 
-    def _dual_detect(self, frame, conf=0.1):
+    def _helmet_detect(self, frame, conf_head=0.1, conf_helmet=0.6):
         """
-        YOLO26 双模型推理，返回合并后的检测结果。
-        同一帧多次调用时使用缓存，避免重复推理。
-        返回: dict {"all_boxes": [...], "detected_types": set} 或 None
+        单模型安全帽检测，支持 head/helmet 分类别置信度过滤。
+        返回: dict {"all_boxes": [...], "head_count": int, "helmet_count": int} 或 None
         """
-        frame_id = id(frame)
-        if frame_id == self._last_frame_id and self._last_dual_results is not None:
-            return self._last_dual_results
-
-        if not self._load_dual_models_safe():
+        if not self._load_helmet_model_safe():
             return None
 
-        res_a = self.model_a(frame, conf=conf, verbose=False)[0]
-        res_b = self.model_b(frame, conf=conf, verbose=False)[0]
+        base_conf = min(conf_head, conf_helmet)
+        results = self.model_b(frame, conf=base_conf, verbose=False)[0]
 
         all_boxes = []
-        detected_types = set()
+        head_count = 0
+        helmet_count = 0
+        skipped = []
 
-        for res in [res_a, res_b]:
-            for box in res.boxes:
-                cls_name = res.names[int(box.cls[0])]
-                conf_val = float(box.conf[0])
-                coords = box.xyxy[0].tolist()
-                all_boxes.append({
-                    "label": cls_name,
-                    "conf": conf_val,
-                    "coords": coords,
-                })
-                detected_types.add(cls_name)
+        for box in results.boxes:
+            cls_name = results.names[int(box.cls[0])]
+            conf_val = float(box.conf[0])
+            coords = box.xyxy[0].tolist()
 
-        result = {
+            # 分类别置信度过滤
+            if cls_name == 'head' and conf_val < conf_head:
+                skipped.append(f"{cls_name}({conf_val:.3f}<{conf_head})")
+                continue
+            if cls_name == 'helmet' and conf_val < conf_helmet:
+                skipped.append(f"{cls_name}({conf_val:.3f}<{conf_helmet})")
+                continue
+
+            all_boxes.append({
+                "label": cls_name,
+                "conf": conf_val,
+                "coords": coords,
+            })
+
+            if cls_name == 'head':
+                head_count += 1
+            elif cls_name == 'helmet':
+                helmet_count += 1
+
+        # 控制台输出检测结果
+        if all_boxes or skipped:
+            print(f"🔍 [安全帽检测] 有效目标: {len(all_boxes)} | head={head_count} helmet={helmet_count} | 过滤掉: {len(skipped)}")
+            for b in all_boxes:
+                icon = "🚨" if b["label"] == "head" else "✅"
+                print(f"   {icon} {b['label']:>6s}  conf={b['conf']:.3f}  box={[int(x) for x in b['coords']]}")
+            for s in skipped:
+                print(f"   ⏭️ 过滤: {s}")
+
+        return {
             "all_boxes": all_boxes,
-            "detected_types": detected_types,
+            "head_count": head_count,
+            "helmet_count": helmet_count,
         }
 
-        self._last_frame_id = frame_id
-        self._last_dual_results = result
-        return result
 
     def _check_cooldown_and_alarm(self, alarm_type, msg, score, coords):
 
