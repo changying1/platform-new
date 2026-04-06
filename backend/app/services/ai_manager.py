@@ -14,6 +14,7 @@ from app.core.database import SessionLocal
 from app.services import ai_features
 from app.services.video_service import VideoService, RECORD_SEGMENT_SECONDS, RECORD_SEGMENT_SAFE_MARGIN_SECONDS
 from urllib.parse import urlsplit, urlunsplit, unquote, quote
+from PIL import Image, ImageDraw, ImageFont
 
 
 class AIManager:
@@ -401,66 +402,85 @@ class AIManager:
     # =========================
     def _save_alarm_image(self, frame, device_id, details=None):
         try:
+            # 1. 如果有报警详情，先在图片上绘制报警框
+            draw_frame = frame.copy()
+            if details and isinstance(details, dict) and "boxes" in details:
+                draw_frame = self._draw_boxes_on_frame(draw_frame, details["boxes"])
+
+            # 2. 生成文件名并保存图片
             filename = f"{device_id}_{int(time.time())}_{uuid.uuid4().hex[:6]}.jpg"
             filepath = os.path.join(self.static_dir, filename)
 
-            # 在帧上绘制报警标注框
-            annotated = self._draw_alarm_boxes(frame, details)
-            cv2.imwrite(filepath, annotated)
+            cv2.imwrite(filepath, draw_frame)
             return f"/static/alarms/{filename}"
 
         except Exception as e:
             print(f"❌ 图片保存失败: {e}")
             return ""
 
-    def _draw_alarm_boxes(self, frame, details):
-        """在帧上绘制报警框 + 标签（报警类型、置信度）"""
-        if not details or not isinstance(details, dict):
+    def _draw_boxes_on_frame(self, frame, boxes):
+        """
+        在图片上绘制报警框和中文标注 (解决乱码问题)。
+        使用 Pillow 库进行中文绘制。
+        """
+        try:
+            # OpenCV 转 Pillow
+            img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil)
+
+            # 加载中文字体 (Windows 默认字体，如果 Linux 需替换路径)
+            font_path = r"C:\Windows\Fonts\simhei.ttf"
+            if not os.path.exists(font_path):
+                # 尝试其他常见中文字体名
+                font_path = r"C:\Windows\Fonts\msyh.ttc"
+            
+            try:
+                # 字体大小根据图片高度动态调整
+                font_size = max(18, int(frame.shape[0] * 0.03))
+                font = ImageFont.truetype(font_path, font_size)
+            except Exception:
+                # 极端情况回退默认
+                font = ImageFont.load_default()
+
+            for box in boxes:
+                coords = box.get("coords")
+                label_type = box.get("type", "异常")
+                msg = box.get("msg", "")
+
+                if not coords or len(coords) < 4:
+                    continue
+
+                x1, y1, x2, y2 = map(int, coords)
+
+                # 绘制红色报警框 (线宽动态)
+                line_width = max(2, int(frame.shape[0] * 0.005))
+                draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=line_width)
+
+                # 标注信息 (模拟人员名称展示)
+                # 备注：实际可关联 face_recognition 的结果
+                person_info = "人员: 模拟用户(李工)"
+                display_text = f"{label_type}\n{person_info}\n{msg}"
+
+                # 绘制文字背景条
+                try:
+                    # 使用 textbbox 获取文本尺寸 (Pillow 8.0+)
+                    bbox = draw.textbbox((x1, y1 - 10), display_text, font=font)
+                    # 往上或往下绘制背景，防止文字出界 (简化始终画在框顶部附近，略带半透明)
+                    bg_rect = [bbox[0]-5, bbox[1]-5, bbox[2]+5, bbox[3]+5]
+                    draw.rectangle(bg_rect, fill=(255, 0, 0, 180))
+                except Exception:
+                    pass
+
+                # 绘制白色文字
+                draw.text((x1, y1 - font_size - 10), display_text, font=font, fill=(255, 255, 255))
+
+            # Pillow 转回 OpenCV
+            return cv2.cvtColor(np.asarray(img_pil), cv2.COLOR_RGB2BGR)
+
+        except Exception as draw_err:
+            print(f"⚠️ 图片标注绘制失败: {draw_err}")
             return frame
 
-        canvas = frame.copy()
-        boxes = details.get("boxes", [])
-        if not boxes:
-            return canvas
-
-        for box in boxes:
-            coords = box.get("coords")
-            if not coords or len(coords) < 4:
-                continue
-
-            x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
-            alarm_type = box.get("type", "报警")
-            msg = box.get("msg", "")
-            score = box.get("score", 0)
-
-            # 颜色：head/未佩戴=红色，helmet/合规=绿色，其他=橙色
-            label_lower = alarm_type.lower()
-            if "未佩戴" in alarm_type or "head" in label_lower:
-                color = (0, 0, 255)       # 红色
-            elif "helmet" in label_lower or "合规" in alarm_type:
-                color = (0, 200, 0)       # 绿色
-            elif "抽烟" in alarm_type or "smoking" in label_lower:
-                color = (0, 140, 255)     # 橙色
-            else:
-                color = (0, 165, 255)     # 默认橙色
-
-            # 画矩形框
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-
-            # 标签文字
-            label = f"{alarm_type} {score:.0%}" if score else alarm_type
-            if msg and msg != alarm_type:
-                label = msg
-
-            # 文字背景
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            thickness = 1
-            (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-            cv2.rectangle(canvas, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(canvas, label, (x1 + 2, y1 - 4), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
-
-        return canvas
 
     def _save_alarm_clip_async(self, alarm_id: int, device_id: str, alarm_time: datetime):
         def _worker():
